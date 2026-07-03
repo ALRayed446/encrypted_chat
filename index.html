@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sealed — private, end-to-end</title>
+<style>
+  :root{
+    --bg: #050705;
+    --surface: #0A0F0A;
+    --surface-2: #101710;
+    --line: #1E3B24;
+    --text: #C9FFD8;
+    --muted: #5C8F6A;
+    --teal: #00FF9C;
+    --teal-dim: #0B4A34;
+    --seal: #00E5FF;
+    --danger: #FF5C5C;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, 'Courier New', monospace;
+    --sans: var(--mono);
+    --display: var(--mono);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    overflow: hidden;
+  }
+  #root{ height: 100vh; width: 100vw; display:flex; position:relative; }
+  /* CRT scanline overlay */
+  body::before{
+    content:''; position:fixed; inset:0; pointer-events:none; z-index:999;
+    background: repeating-linear-gradient(0deg, rgba(0,255,156,0.025) 0px, rgba(0,255,156,0.025) 1px, transparent 1px, transparent 3px);
+    mix-blend-mode: overlay;
+  }
+  body::after{
+    content:''; position:fixed; inset:0; pointer-events:none; z-index:998;
+    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.45) 100%);
+  }
+  .blink{ animation: blink 1s step-end infinite; }
+  @keyframes blink{ 50%{ opacity:0; } }
+
+  /* ---------- Seal icon (signature element) ---------- */
+  .seal{
+    width: 34px; height: 34px; border-radius: 3px;
+    background: var(--surface-2);
+    border: 1px solid var(--teal);
+    display:flex; align-items:center; justify-content:center;
+    box-shadow: 0 0 10px rgba(0,255,156,0.25), inset 0 0 8px rgba(0,255,156,0.08);
+    flex-shrink:0;
+    transition: transform .18s ease;
+  }
+  .seal svg{ width:16px; height:16px; }
+  .seal.stamp{ animation: stamp .35s ease; }
+  @keyframes stamp{
+    0%{ transform: scale(1); box-shadow: 0 0 10px rgba(0,255,156,0.25); }
+    35%{ transform: scale(0.72); }
+    60%{ transform: scale(1.12); box-shadow: 0 0 22px rgba(0,255,156,0.6); }
+    100%{ transform: scale(1); box-shadow: 0 0 10px rgba(0,255,156,0.25); }
+  }
+  .wordmark{ font-family: var(--display); font-weight: 700; font-size: 19px; letter-spacing: 0.5px; text-shadow: 0 0 8px rgba(0,255,156,0.5); }
+  .wordmark span{ color: var(--seal); }
+
+  /* ---------- Auth screen ---------- */
+  .auth-wrap{
+    width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+    background:
+      radial-gradient(700px 500px at 20% 15%, rgba(0,255,156,0.05), transparent 60%),
+      radial-gradient(700px 500px at 80% 85%, rgba(0,229,255,0.04), transparent 60%),
+      var(--bg);
+  }
+  .auth-card{
+    width: 400px; max-width: 90vw; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 6px; padding: 0;
+    box-shadow: 0 0 40px rgba(0,255,156,0.06);
+    overflow:hidden;
+  }
+  .term-bar{
+    display:flex; align-items:center; gap:6px; padding:9px 12px; background: var(--surface-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .term-dot{ width:9px; height:9px; border-radius:50%; }
+  .term-bar .term-title{ margin-left:8px; font-size:11px; color: var(--muted); }
+  .auth-body{ padding: 24px 26px; }
+  .auth-head{ display:flex; align-items:center; gap:10px; margin-bottom: 6px; }
+  .auth-sub{ color: var(--muted); font-size: 12px; margin: 4px 0 22px; line-height:1.6; }
+  .tabs{ display:flex; gap:4px; background: var(--surface-2); border-radius:4px; padding:4px; margin-bottom:20px; border: 1px solid var(--line); }
+  .tab{ flex:1; text-align:center; padding:8px 0; border-radius:3px; cursor:pointer; font-size:12.5px; color:var(--muted); font-weight:500; transition:.15s; }
+  .tab.active{ background: rgba(0,255,156,0.08); color: var(--teal); text-shadow: 0 0 6px rgba(0,255,156,0.4); }
+  label{ display:block; font-size:11.5px; color:var(--teal); margin: 14px 0 6px; }
+  label::before{ content:'$ '; color: var(--muted); }
+  input[type=text], input[type=password]{
+    width:100%; background: #000; border:1px solid var(--line); color: var(--text);
+    padding: 10px 12px; border-radius: 4px; font-size: 13.5px; font-family: var(--mono);
+    outline:none; caret-color: var(--teal);
+  }
+  input:focus{ border-color: var(--teal); box-shadow: 0 0 0 1px rgba(0,255,156,0.25); }
+  .btn{
+    width:100%; margin-top:22px; background: transparent; color: var(--teal); border: 1px solid var(--teal);
+    padding: 11px 0; border-radius: 4px; font-weight:600; font-size:13px; cursor:pointer;
+    font-family: var(--mono); letter-spacing: 0.5px; text-transform: uppercase;
+    transition: all .15s;
+  }
+  .btn:hover{ background: rgba(0,255,156,0.1); box-shadow: 0 0 14px rgba(0,255,156,0.25); }
+  .btn:disabled{ opacity:.5; cursor: default; }
+  .btn.ghost{ background:transparent; border:1px solid var(--line); color:var(--muted); }
+  .err{ color: var(--danger); font-size:12px; margin-top:12px; min-height:0; }
+  .err:not(:empty)::before{ content:'✗ '; }
+  .hint{ font-size: 11px; color: var(--muted); margin-top: 8px; line-height:1.6;}
+  .fingerprint{
+    font-family: var(--mono); font-size: 12px; letter-spacing:1px; color: var(--teal);
+    background: #000; border:1px solid var(--line); border-radius:4px;
+    padding: 10px 12px; margin-top: 10px; word-break: break-all;
+  }
+  .boot-log{
+    font-family: var(--mono); font-size: 11.5px; color: var(--teal); background:#000;
+    border:1px solid var(--line); border-radius:4px; padding:10px 12px; margin-top:14px;
+    line-height:1.9; min-height: 20px;
+  }
+  .boot-log div::before{ content:'> '; color: var(--muted); }
+  .boot-log div.done::before{ content:'✓ '; color: var(--teal); }
+
+  /* ---------- App shell ---------- */
+  .shell{ display:flex; width:100%; height:100%; }
+  .sidebar{
+    width: 300px; flex-shrink:0; background: var(--surface); border-right: 1px solid var(--line);
+    display:flex; flex-direction:column;
+  }
+  .sb-head{ padding: 14px 16px; display:flex; align-items:center; justify-content:space-between; border-bottom: 1px solid var(--line); }
+  .me{ display:flex; align-items:center; gap:9px; min-width:0; }
+  .avatar{
+    width:32px; height:32px; border-radius:4px; background: #000;
+    display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;
+    color: var(--teal); border: 1px solid var(--line); flex-shrink:0; font-family: var(--mono);
+  }
+  .me-name{ font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .me-name::before{ content:'~/'; color: var(--muted); }
+  .icon-btn{
+    background:none; border:none; color: var(--muted); cursor:pointer; padding:6px;
+    border-radius:4px; display:flex; align-items:center; justify-content:center;
+  }
+  .icon-btn:hover{ background: var(--surface-2); color: var(--teal); }
+  .sb-actions{ padding: 12px 12px 0; display:flex; gap:8px; }
+  .sb-actions .btn{ margin:0; font-size:11.5px; padding:9px 0; }
+  .convo-list{ flex:1; overflow-y:auto; padding: 10px 8px; }
+  .convo{
+    display:flex; align-items:center; gap:10px; padding:9px 8px; border-radius:4px; cursor:pointer;
+    margin-bottom: 2px; border: 1px solid transparent;
+  }
+  .convo:hover{ background: var(--surface-2); border-color: var(--line); }
+  .convo.active{ background: rgba(0,255,156,0.06); border-color: var(--teal-dim); }
+  .convo-meta{ min-width:0; flex:1; }
+  .convo-name{ font-size: 13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .convo-sub{ font-size:11px; color: var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .empty-side{ color: var(--muted); font-size:11.5px; padding: 18px 14px; line-height:1.7; }
+  .empty-side::before{ content:'// '; }
+
+  .main{ flex:1; display:flex; flex-direction:column; min-width:0; background: var(--bg); }
+  .chat-head{
+    padding: 13px 20px; border-bottom: 1px solid var(--line); display:flex; align-items:center;
+    justify-content:space-between; flex-shrink:0;
+  }
+  .chat-head-title{ font-size:14px; font-weight:700; }
+  .chat-head-title::before{ content:'#'; color: var(--muted); margin-right: 5px; }
+  .chat-head-sub{ font-size:11px; color: var(--muted); font-family: var(--mono); margin-top:2px; }
+  .messages{ flex:1; overflow-y:auto; padding: 20px; display:flex; flex-direction:column; gap:12px; }
+  .msg-row{ display:flex; flex-direction:column; max-width: 62%; }
+  .msg-row.mine{ align-self:flex-end; align-items:flex-end; }
+  .msg-row.theirs{ align-self:flex-start; align-items:flex-start; }
+  .msg-sender{ font-size:10.5px; color: var(--muted); margin: 0 4px 3px; font-family: var(--mono); }
+  .msg-sender::before{ content:'['; } .msg-sender::after{ content:']'; }
+  .bubble{
+    background: var(--surface); border:1px solid var(--line); border-left: 2px solid var(--line);
+    border-radius: 4px; padding: 9px 13px; font-size: 13.5px; line-height:1.55; position:relative;
+    font-family: var(--mono);
+  }
+  .bubble::before{ content:'>'; color: var(--muted); margin-right:8px; }
+  .msg-row.mine .bubble{ border-left-color: var(--teal); background: rgba(0,255,156,0.04); }
+  .msg-row.theirs .bubble{ border-left-color: var(--seal); }
+  .bubble img{ max-width: 260px; border-radius:3px; display:block; margin-top:6px; filter: saturate(0.9) contrast(1.05); }
+  .bubble .file-chip{
+    display:flex; align-items:center; gap:8px; background: #000; border:1px solid var(--line);
+    border-radius:4px; padding:8px 10px; margin-top:6px; font-size:12px; text-decoration:none; color: var(--teal);
+    font-family: var(--mono);
+  }
+  .msg-foot{ display:flex; align-items:center; gap:8px; margin-top:4px; }
+  .msg-time{ font-size:10px; color: var(--muted); font-family: var(--mono); }
+  .save-btn{
+    font-size: 10px; border:1px solid var(--line); background:none; color: var(--muted);
+    padding: 2px 8px; border-radius: 3px; cursor:pointer; font-family: var(--mono);
+  }
+  .save-btn::before{ content:'[ '; } .save-btn::after{ content:' ]'; }
+  .save-btn:hover{ color: var(--seal); border-color: var(--seal); }
+  .save-btn.saved{ color: var(--seal); border-color: var(--seal); }
+  .ring{ width:8px; height:8px; border-radius:50%; border: 1.5px solid var(--seal); border-top-color: transparent; animation: spin 1s linear infinite; display:inline-block; }
+  @keyframes spin{ to{ transform: rotate(360deg); } }
+
+  .composer{ padding: 14px 18px; border-top: 1px solid var(--line); display:flex; gap:10px; align-items:flex-end; flex-shrink:0; }
+  .composer textarea{
+    flex:1; resize:none; background: #000; border:1px solid var(--line); color: var(--text);
+    border-radius: 4px; padding: 10px 14px; font-family: var(--mono); font-size:13.5px; outline:none;
+    max-height: 120px; caret-color: var(--teal);
+  }
+  .composer textarea::placeholder{ color: var(--muted); }
+  .composer textarea:focus{ border-color: var(--teal); box-shadow: 0 0 0 1px rgba(0,255,156,0.2); }
+  .send-btn{
+    height:38px; padding: 0 16px; border-radius:4px; background: transparent; border: 1px solid var(--teal); cursor:pointer;
+    display:flex; align-items:center; justify-content:center; flex-shrink:0; color: var(--teal);
+    font-family: var(--mono); font-size: 11.5px; font-weight:700; letter-spacing:0.5px;
+  }
+  .send-btn:hover{ background: rgba(0,255,156,0.1); box-shadow: 0 0 12px rgba(0,255,156,0.25); }
+  .send-btn:disabled{ opacity:.4; }
+
+  .no-chat{ flex:1; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; color: var(--muted); font-size:13px; }
+  .no-chat .seal{ opacity:.6; margin-bottom: 6px; }
+
+  /* modal */
+  .modal-bg{ position:fixed; inset:0; background: rgba(0,0,0,0.75); display:flex; align-items:center; justify-content:center; z-index:50; }
+  .modal{ width: 380px; max-width:90vw; background: var(--surface); border:1px solid var(--line); border-radius:6px; padding:0; max-height: 80vh; display:flex; flex-direction:column; overflow:hidden; box-shadow: 0 0 40px rgba(0,255,156,0.08); }
+  .modal-body{ padding: 20px 22px; display:flex; flex-direction:column; overflow:hidden; }
+  .modal h3{ margin:0 0 4px; font-family: var(--display); font-size:15px; color: var(--teal); }
+  .modal h3::before{ content:'$ '; color: var(--muted); }
+  .modal-sub{ font-size:11.5px; color:var(--muted); margin-bottom:14px; line-height:1.6; }
+  .user-pick{ display:flex; align-items:center; gap:10px; padding:8px 6px; border-radius:4px; cursor:pointer; }
+  .user-pick:hover{ background: var(--surface-2); }
+  .user-pick input{ width:auto; accent-color: var(--teal); }
+  .user-list{ overflow-y:auto; flex:1; margin: 4px 0 14px; }
+  .modal-footer{ display:flex; gap:8px; }
+  .modal-footer .btn{ margin:0; }
+
+  ::-webkit-scrollbar{ width:8px; }
+  ::-webkit-scrollbar-thumb{ background: var(--line); border-radius:4px; }
+
+  .badge{ font-size:9px; font-family: var(--mono); background: #000; color: var(--seal); border:1px solid var(--line); padding:1px 6px; border-radius:3px; margin-left:6px; }
+  .toast{
+    position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    background: var(--surface-2); border:1px solid var(--teal); color: var(--teal);
+    padding: 10px 16px; border-radius: 4px; font-size:12.5px; z-index:100; font-family: var(--mono);
+    box-shadow: 0 0 16px rgba(0,255,156,0.2);
+  }
+  .toast::before{ content:'> '; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+/* =========================================================================
+   SEALED — a general-purpose, end-to-end encrypted private chat app.
+
+   HOW THE ENCRYPTION ACTUALLY WORKS (read this, it's not decoration):
+   - Every account gets an RSA-OAEP 2048 keypair, generated in your browser
+     with the native Web Crypto API.
+   - The PUBLIC key is stored openly (that's the point of a public key).
+   - The PRIVATE key is encrypted with a key derived from your password via
+     PBKDF2 (250,000 rounds) before it's ever written to storage. Your
+     password itself is never stored or transmitted anywhere.
+   - Every message gets its own random AES-256-GCM key. The message content
+     is encrypted with that key. The AES key is then individually wrapped
+     (RSA-OAEP encrypted) for each recipient's public key, and only those
+     wrapped copies are stored.
+   - Net effect: the storage layer only ever sees ciphertext + wrapped keys.
+     Only someone holding the matching private key (unlocked with the right
+     password) can decrypt a message.
+
+   HONEST LIMITATIONS (please read this too):
+   - This is trust-on-first-use: there's no central authority verifying
+     public keys, so use the "safety code" fingerprint shown for each
+     contact to confirm keys match over a separate channel (call them, don't
+     just trust the app) if you want protection against a compromised
+     directory swapping someone's key.
+   - There's no forward secrecy / key ratcheting like Signal — one leaked
+     private key can decrypt that account's past messages.
+   - Your private key is decrypted into memory only for this browser tab and
+     is never written to disk — so you'll need to log in again each visit.
+     Security is only as strong as your password.
+   ========================================================================= */
+
+const $ = sel => document.querySelector(sel);
+const root = $('#root');
+const STORAGE_AVAILABLE = (typeof window.storage !== 'undefined' && window.storage !== null
+  && typeof window.storage.get === 'function' && typeof window.storage.set === 'function');
+
+const AUTO_DELETE_MS = 30 * 60 * 1000; // 30 minutes after save/download
+
+// ---- in-memory session state (never persisted) ----
+let session = {
+  username: null,
+  displayName: null,
+  privateKey: null,   // CryptoKey, RSA-OAEP, decrypt-capable
+  publicKeyJwk: null,
+  fingerprint: null,
+};
+let directory = [];          // [{username, displayName, publicKeyJwk, fingerprint}]
+let convos = [];             // [{id, type, members, name, createdAt}]
+let activeConvoId = null;
+let messagesCache = {};      // convoId -> decrypted message list
+let pollTimer = null;
+let ui = { authTab: 'login', authErr: '', busy: false, authSteps: [], showNewChat: false, picked: [] };
+
+// ---------------------------------------------------------------- helpers
+
+function buf2b64(buf){
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function b642buf(b64){
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function strToBuf(str){ return new TextEncoder().encode(str); }
+function bufToStr(buf){ return new TextDecoder().decode(buf); }
+function initials(name){
+  return (name||'?').trim().split(/\s+/).slice(0,2).map(w=>w[0]?.toUpperCase()||'').join('');
+}
+function fmtTime(ts){
+  const d = new Date(ts);
+  return d.toLocaleString(undefined, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+function randomId(){ return buf2b64(crypto.getRandomValues(new Uint8Array(12))).replace(/[^a-zA-Z0-9]/g,'').slice(0,16); }
+function escapeHtml(s){
+  return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg){
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(), 2400);
+}
+
+// ------------------------------------------------------------- crypto core
+
+async function deriveWrapKey(password, saltBytes){
+  const baseKey = await crypto.subtle.importKey('raw', strToBuf(password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name:'PBKDF2', salt: saltBytes, iterations: 250000, hash: 'SHA-256' },
+    baseKey, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']
+  );
+}
+
+async function generateKeypair(){
+  return crypto.subtle.generateKey(
+    { name:'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash:'SHA-256' },
+    true, ['encrypt','decrypt']
+  );
+}
+
+async function fingerprintOf(publicKeyJwk){
+  const key = await crypto.subtle.importKey('jwk', publicKeyJwk, {name:'RSA-OAEP', hash:'SHA-256'}, true, ['encrypt']);
+  const spki = await crypto.subtle.exportKey('spki', key);
+  const hash = await crypto.subtle.digest('SHA-256', spki);
+  const hex = Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  return hex.slice(0,20).toUpperCase().match(/.{1,4}/g).join(' ');
+}
+
+// encrypt arbitrary bytes for a list of recipient usernames -> {iv, ciphertext, keys:{user: wrappedB64}}
+async function encryptForRecipients(bytes, recipientUsernames){
+  const aesKey = await crypto.subtle.generateKey({name:'AES-GCM', length:256}, true, ['encrypt','decrypt']);
+  const rawAes = await crypto.subtle.exportKey('raw', aesKey);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({name:'AES-GCM', iv}, aesKey, bytes);
+
+  const keys = {};
+  for (const uname of recipientUsernames){
+    const entry = directory.find(d => d.username === uname) ||
+                  (uname === session.username ? {publicKeyJwk: session.publicKeyJwk} : null);
+    if (!entry) continue;
+    const pub = await crypto.subtle.importKey('jwk', entry.publicKeyJwk, {name:'RSA-OAEP', hash:'SHA-256'}, true, ['encrypt']);
+    const wrapped = await crypto.subtle.encrypt({name:'RSA-OAEP'}, pub, rawAes);
+    keys[uname] = buf2b64(wrapped);
+  }
+  return { iv: buf2b64(iv), ciphertext: buf2b64(ciphertext), keys };
+}
+
+async function decryptMessage(msg){
+  const wrapped = msg.keys[session.username];
+  if (!wrapped) throw new Error('no key for this account');
+  const rawAes = await crypto.subtle.decrypt({name:'RSA-OAEP'}, session.privateKey, b642buf(wrapped));
+  const aesKey = await crypto.subtle.importKey('raw', rawAes, {name:'AES-GCM'}, false, ['decrypt']);
+  const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv: b642buf(msg.iv)}, aesKey, b642buf(msg.ciphertext));
+  return plain;
+}
+
+// ------------------------------------------------------------- storage io
+
+async function getJSON(key, shared){
+  try{
+    const r = await window.storage.get(key, shared);
+    return r ? JSON.parse(r.value) : null;
+  }catch(e){ return null; }
+}
+async function setJSON(key, value, shared){
+  let result;
+  try{
+    result = await window.storage.set(key, JSON.stringify(value), shared);
+  }catch(e){
+    throw new Error('Storage error while saving — ' + (e.message || 'the connection to Claude\'s storage failed') + '. Try again in a moment.');
+  }
+  if (!result){
+    throw new Error('Storage rejected the save. This usually means the storage backend is unavailable right now — try again in a moment.');
+  }
+  return result;
+}
+
+async function loadDirectory(){
+  directory = (await getJSON('directory', true)) || [];
+}
+
+// -------------------------------------------------------------- auth flow
+
+async function signUp(username, displayName, password, onStep){
+  username = username.trim().toLowerCase();
+  displayName = displayName.trim() || username;
+  if (!username || !password) throw new Error('Username and password are required.');
+  if (password.length < 8) throw new Error('Use a password of at least 8 characters — it protects your private key.');
+
+  onStep?.('checking username availability');
+  await loadDirectory();
+  if (directory.some(d => d.username === username)) throw new Error('That username is already sealed by someone else.');
+
+  const existingAccount = await getJSON('account:'+username, true);
+  if (existingAccount) throw new Error('That username is already taken.');
+
+  onStep?.('generating RSA-2048 keypair');
+  const keypair = await generateKeypair();
+  const publicKeyJwk = await crypto.subtle.exportKey('jwk', keypair.publicKey);
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', keypair.privateKey);
+
+  onStep?.('deriving key from passphrase (PBKDF2, 250000 rounds)');
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const wrapKey = await deriveWrapKey(password, salt);
+
+  onStep?.('sealing private key with AES-256-GCM');
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encPrivate = await crypto.subtle.encrypt({name:'AES-GCM', iv}, wrapKey, strToBuf(JSON.stringify(privateKeyJwk)));
+
+  const account = {
+    username, displayName,
+    publicKeyJwk,
+    salt: buf2b64(salt),
+    iv: buf2b64(iv),
+    encPrivateKey: buf2b64(encPrivate),
+    createdAt: Date.now()
+  };
+  onStep?.('writing account record');
+  await setJSON('account:'+username, account, true);
+
+  onStep?.('computing key fingerprint');
+  const fp = await fingerprintOf(publicKeyJwk);
+  directory.push({ username, displayName, publicKeyJwk, fingerprint: fp });
+  await setJSON('directory', directory, true);
+
+  onStep?.('done');
+  session = { username, displayName, privateKey: keypair.privateKey, publicKeyJwk, fingerprint: fp };
+  await setJSON('userConvos:'+username, [], true); // shared store, so this account's conversation list is discoverable next login
+}
+
+async function logIn(username, password){
+  username = username.trim().toLowerCase();
+  const account = await getJSON('account:'+username, true);
+  if (!account) throw new Error('No account with that username.');
+
+  const wrapKey = await deriveWrapKey(password, new Uint8Array(b642buf(account.salt)));
+  let privateKeyJwk;
+  try{
+    const plain = await crypto.subtle.decrypt(
+      {name:'AES-GCM', iv: new Uint8Array(b642buf(account.iv))}, wrapKey, b642buf(account.encPrivateKey)
+    );
+    privateKeyJwk = JSON.parse(bufToStr(plain));
+  }catch(e){
+    throw new Error('Wrong password.'); // AES-GCM auth tag fails to verify -> this IS the auth check
+  }
+  const privateKey = await crypto.subtle.importKey('jwk', privateKeyJwk, {name:'RSA-OAEP', hash:'SHA-256'}, true, ['decrypt']);
+  const fp = await fingerprintOf(account.publicKeyJwk);
+  session = { username, displayName: account.displayName, privateKey, publicKeyJwk: account.publicKeyJwk, fingerprint: fp };
+}
+
+function logOut(){
+  session = { username:null, displayName:null, privateKey:null, publicKeyJwk:null, fingerprint:null };
+  convos = []; messagesCache = {}; activeConvoId = null;
+  if (pollTimer) clearInterval(pollTimer);
+  render();
+}
+
+// ---------------------------------------------------------- conversations
+
+async function loadConvos(){
+  const ids = (await getJSON('userConvos:'+session.username, true)) || [];
+  const list = [];
+  for (const id of ids){
+    const c = await getJSON('convo:'+id, true);
+    if (c) list.push(c);
+  }
+  list.sort((a,b)=> (b.lastActivity||b.createdAt) - (a.lastActivity||a.createdAt));
+  convos = list;
+}
+
+async function addConvoToUser(username, convoId){
+  const list = (await getJSON('userConvos:'+username, true)) || [];
+  if (!list.includes(convoId)){
+    list.push(convoId);
+    await setJSON('userConvos:'+username, list, true);
+  }
+}
+
+function dmId(a,b){ return 'dm_' + [a,b].sort().join('__'); }
+
+async function openOrCreateDM(otherUsername){
+  const id = dmId(session.username, otherUsername);
+  let c = await getJSON('convo:'+id, true);
+  if (!c){
+    c = { id, type:'dm', members:[session.username, otherUsername], createdAt: Date.now(), lastActivity: Date.now() };
+    await setJSON('convo:'+id, c, true);
+    await setJSON('messages:'+id, [], true);
+    await addConvoToUser(session.username, id);
+    await addConvoToUser(otherUsername, id);
+  }
+  await loadConvos();
+  activeConvoId = id;
+  await loadMessages(id);
+  render();
+}
+
+async function createGroup(name, memberUsernames){
+  const id = 'grp_' + randomId();
+  const members = Array.from(new Set([session.username, ...memberUsernames]));
+  const c = { id, type:'group', name: name || 'Untitled group', members, createdAt: Date.now(), lastActivity: Date.now() };
+  await setJSON('convo:'+id, c, true);
+  await setJSON('messages:'+id, [], true);
+  for (const m of members) await addConvoToUser(m, id);
+  await loadConvos();
+  activeConvoId = id;
+  await loadMessages(id);
+  render();
+}
+
+// --------------------------------------------------------------- messages
+
+async function loadMessages(convoId){
+  let list = (await getJSON('messages:'+convoId, true)) || [];
+  const now = Date.now();
+  const before = list.length;
+  list = list.filter(m => !(m.savedAt && (now - m.savedAt) > AUTO_DELETE_MS));
+  if (list.length !== before) await setJSON('messages:'+convoId, list, true);
+
+  const decrypted = [];
+  for (const m of list){
+    try{
+      const plainBuf = await decryptMessage(m);
+      decrypted.push({ ...m, _plainBuf: plainBuf });
+    }catch(e){ /* not for us / corrupted, skip */ }
+  }
+  messagesCache[convoId] = decrypted;
+}
+
+async function sendMessage({type, text, file}){
+  const convo = convos.find(c=>c.id===activeConvoId);
+  if (!convo) return;
+  let bytes, filename=null, mime=null;
+
+  if (type === 'text'){
+    if (!text.trim()) return;
+    bytes = strToBuf(text.trim());
+  } else {
+    filename = file.name; mime = file.type;
+    bytes = await file.arrayBuffer();
+    if (bytes.byteLength > 3 * 1024 * 1024){
+      toast('That file is a bit large for encrypted storage — keep it under ~3MB.');
+      return;
+    }
+  }
+
+  const enc = await encryptForRecipients(new Uint8Array(bytes), convo.members);
+  const msg = {
+    id: randomId(),
+    sender: session.username,
+    ts: Date.now(),
+    type,
+    filename, mime,
+    iv: enc.iv, ciphertext: enc.ciphertext, keys: enc.keys,
+    savedAt: null
+  };
+
+  const list = (await getJSON('messages:'+convo.id, true)) || [];
+  list.push(msg);
+  await setJSON('messages:'+convo.id, list, true);
+
+  convo.lastActivity = Date.now();
+  await setJSON('convo:'+convo.id, convo, true);
+
+  await loadMessages(convo.id);
+  await loadConvos();
+  render();
+  flashSeal();
+}
+
+async function markSaved(msgId){
+  const list = (await getJSON('messages:'+activeConvoId, true)) || [];
+  const m = list.find(x=>x.id===msgId);
+  if (m && !m.savedAt){
+    m.savedAt = Date.now();
+    await setJSON('messages:'+activeConvoId, list, true);
+    await loadMessages(activeConvoId);
+    render();
+  }
+}
+
+function flashSeal(){
+  const el = document.querySelector('.chat-head .seal');
+  if (el){ el.classList.remove('stamp'); void el.offsetWidth; el.classList.add('stamp'); }
+}
+
+// ------------------------------------------------------------------- poll
+
+function startPolling(){
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async ()=>{
+    if (!session.username) return;
+    await loadConvos();
+    if (activeConvoId) await loadMessages(activeConvoId);
+    render();
+  }, 4000);
+}
+
+// --------------------------------------------------------------- rendering
+
+function render(){
+  if (!STORAGE_AVAILABLE){ renderStorageError(); return; }
+  if (!session.username){ renderAuth(); return; }
+  renderApp();
+}
+
+function renderStorageError(){
+  root.innerHTML = `
+    <div class="auth-wrap">
+      <div class="auth-card">
+        <div class="term-bar">
+          <div class="term-dot" style="background:#FF5C5C;"></div>
+          <div class="term-dot" style="background:#F5C542;"></div>
+          <div class="term-dot" style="background:#00FF9C;"></div>
+          <div class="term-title">root@sealed:~$ status</div>
+        </div>
+        <div class="auth-body">
+          <div class="auth-head">
+            <div class="seal">${sealSvg()}</div>
+            <div class="wordmark">Seal<span>ed</span></div>
+          </div>
+          <div class="boot-log" style="margin-top:14px;">
+            <div class="done">checking storage backend</div>
+            <div style="color:#FF5C5C;">✗ window.storage is not available in this window</div>
+          </div>
+          <div class="auth-sub" style="margin-top:16px;">
+            This app needs Claude's shared storage to create accounts and sync messages between people — and that bridge is only active when this file is opened <strong style="color:var(--teal);">through the Claude.ai conversation itself</strong> (the preview panel, or a link Claude shares in chat).<br/><br/>
+            It will <em>not</em> work if the .html file has been downloaded and opened directly on your computer, or uploaded to a static host like GitHub Pages — there's no server behind it in that case, so accounts can't be created or shared between people.<br/><br/>
+            Open this from the chat where I built it for you, and it should work. If you're already doing that and still seeing this, tell me — that would mean something else is going on and I'll dig further.
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderAuth(){
+  root.innerHTML = `
+    <div class="auth-wrap">
+      <div class="auth-card">
+        <div class="term-bar">
+          <div class="term-dot" style="background:#FF5C5C;"></div>
+          <div class="term-dot" style="background:#F5C542;"></div>
+          <div class="term-dot" style="background:#00FF9C;"></div>
+          <div class="term-title">root@sealed:~$</div>
+        </div>
+        <div class="auth-body">
+        <div class="auth-head">
+          <div class="seal">${sealSvg()}</div>
+          <div class="wordmark">Seal<span>ed</span></div>
+        </div>
+        <div class="auth-sub">// private messages, sealed to whoever you send them to.<br/>encryption runs on your device — this app never sees plaintext.</div>
+        <div class="tabs">
+          <div class="tab ${ui.authTab==='login'?'active':''}" data-tab="login">login</div>
+          <div class="tab ${ui.authTab==='signup'?'active':''}" data-tab="signup">create_account</div>
+        </div>
+        <form id="authForm">
+          <label>username</label>
+          <input type="text" id="f-username" autocomplete="username" placeholder="e.g. rayed446" />
+          ${ui.authTab==='signup' ? `<label>display_name</label><input type="text" id="f-display" placeholder="what people will see" />` : ''}
+          <label>passphrase</label>
+          <input type="password" id="f-password" autocomplete="${ui.authTab==='signup'?'new-password':'current-password'}" placeholder="••••••••" />
+          ${ui.authTab==='signup' ? `<div class="hint">min. 8 characters recommended — this is the only thing protecting your private key, nothing else guards it.</div>` : ''}
+          <button class="btn" type="submit" ${ui.busy?'disabled':''}>${ui.busy ? 'working...' : (ui.authTab==='login' ? '[ log in ]' : '[ create sealed account ]')}</button>
+          <div class="err">${ui.authErr ? escapeHtml(ui.authErr) : ''}</div>
+        </form>
+        ${ui.busy && ui.authSteps.length ? `<div class="boot-log">${ui.authSteps.map((s,i)=>`<div class="${i<ui.authSteps.length-1?'done':''}">${escapeHtml(s)}${i===ui.authSteps.length-1?' <span class="blink">_</span>':''}</div>`).join('')}</div>` : ''}
+        ${ui.authTab==='signup' && !ui.busy ? `<div class="hint">your passphrase unlocks your private key — it's never stored anywhere, not even here. forget it and there's no reset: that's what makes the encryption real.</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+  root.querySelectorAll('.tab').forEach(t=>t.addEventListener('click', ()=>{ ui.authTab = t.dataset.tab; ui.authErr=''; render(); }));
+  $('#authForm').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const username = $('#f-username').value;
+    const password = $('#f-password').value;
+    const display = ui.authTab==='signup' ? $('#f-display').value : '';
+    ui.authErr=''; ui.busy = true; ui.authSteps = ['initializing']; render();
+    try{
+      if (ui.authTab==='signup'){
+        await signUp(username, display, password, (step)=>{ ui.authSteps.push(step); render(); });
+      } else {
+        ui.authSteps.push('deriving key from passphrase');
+        render();
+        await logIn(username, password);
+        ui.authSteps.push('done');
+      }
+      await loadDirectory();
+      await loadConvos();
+      startPolling();
+      ui.busy = false;
+      render();
+    }catch(err){
+      ui.busy = false; ui.authSteps = []; ui.authErr = err.message || 'Something went wrong.'; render();
+    }
+  });
+}
+
+function sealSvg(){
+  return `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 2L4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-8-4z" fill="#0B0D12" opacity="0.85"/>
+    <path d="M8.5 12.2l2.4 2.4 4.6-4.9" stroke="#E8A33D" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+function convoTitle(c){
+  if (c.type==='group') return c.name;
+  const other = c.members.find(m=>m!==session.username);
+  const d = directory.find(x=>x.username===other);
+  return d ? d.displayName : other;
+}
+function convoSubtitle(c){
+  if (c.type==='group') return c.members.length + ' members';
+  const other = c.members.find(m=>m!==session.username);
+  return '@'+other;
+}
+
+function renderApp(){
+  const activeConvo = convos.find(c=>c.id===activeConvoId);
+
+  root.innerHTML = `
+    <div class="shell">
+      <div class="sidebar">
+        <div class="sb-head">
+          <div class="me">
+            <div class="avatar">${escapeHtml(initials(session.displayName))}</div>
+            <div class="me-name">${escapeHtml(session.displayName)}</div>
+          </div>
+          <button class="icon-btn" id="btnLogout" title="Log out">${logoutSvg()}</button>
+        </div>
+        <div class="sb-actions">
+          <button class="btn" id="btnNewChat">New private chat</button>
+        </div>
+        <div class="convo-list">
+          ${convos.length === 0 ? `<div class="empty-side">No conversations yet. Start one — every message is sealed with your contact's public key before it leaves your browser.</div>` : ''}
+          ${convos.map(c => `
+            <div class="convo ${c.id===activeConvoId?'active':''}" data-id="${c.id}">
+              <div class="avatar">${escapeHtml(initials(convoTitle(c)))}</div>
+              <div class="convo-meta">
+                <div class="convo-name">${escapeHtml(convoTitle(c))}${c.type==='group'?'<span class="badge">GROUP</span>':''}</div>
+                <div class="convo-sub">${escapeHtml(convoSubtitle(c))}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <div class="main">
+        ${activeConvo ? renderChat(activeConvo) : `
+          <div class="no-chat">
+            <div class="seal">${sealSvg()}</div>
+            <div>Pick a conversation, or start a new one.</div>
+          </div>
+        `}
+      </div>
+    </div>
+    ${ui.showNewChat ? renderNewChatModal() : ''}
+  `;
+
+  attachAppListeners();
+}
+
+function renderChat(convo){
+  const msgs = messagesCache[convo.id] || [];
+  let headSub;
+  if (convo.type === 'dm'){
+    const otherUsername = convo.members.find(m=>m!==session.username);
+    const other = directory.find(d=>d.username===otherUsername);
+    headSub = 'Safety code: ' + (other ? other.fingerprint : '');
+  } else {
+    headSub = convo.members.length + ' members · each message sealed individually per member';
+  }
+
+  return `
+    <div class="chat-head">
+      <div>
+        <div class="chat-head-title">${escapeHtml(convoTitle(convo))}</div>
+        <div class="chat-head-sub">${escapeHtml(headSub)}</div>
+      </div>
+      <div class="seal" title="Encrypted with RSA-OAEP + AES-256-GCM">${sealSvg()}</div>
+    </div>
+    <div class="messages" id="msgList">
+      ${msgs.map(m => renderMessage(m)).join('')}
+    </div>
+    <div class="composer">
+      <label class="icon-btn" style="cursor:pointer;">
+        ${clipSvg()}
+        <input type="file" id="fileInput" style="display:none" />
+      </label>
+      <textarea id="textInput" rows="1" placeholder="Write a sealed message…"></textarea>
+      <button class="send-btn" id="btnSend">${sendSvg()}</button>
+    </div>
+  `;
+}
+
+function renderMessage(m){
+  const mine = m.sender === session.username;
+  const senderInfo = directory.find(d=>d.username===m.sender);
+  const senderName = mine ? 'You' : (senderInfo ? senderInfo.displayName : m.sender);
+  let body = '';
+
+  if (m.type === 'text'){
+    body = `<div>${escapeHtml(bufToStr(m._plainBuf))}</div>`;
+  } else {
+    const blob = new Blob([m._plainBuf], { type: m.mime || 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    if (m.type === 'image'){
+      body = `<div><img src="${url}" /></div>`;
+    } else {
+      body = `<a class="file-chip" href="${url}" download="${escapeHtml(m.filename||'file')}" data-download-id="${m.id}">${fileSvg()} ${escapeHtml(m.filename||'file')}</a>`;
+    }
+  }
+
+  const savedMarkup = m.savedAt
+    ? `<span class="save-btn saved"><span class="ring"></span> deletes ${timeLeft(m.savedAt)}</span>`
+    : `<button class="save-btn" data-save-id="${m.id}">Save</button>`;
+
+  return `
+    <div class="msg-row ${mine?'mine':'theirs'}">
+      <div class="msg-sender">${escapeHtml(senderName)}</div>
+      <div class="bubble">${body}</div>
+      <div class="msg-foot">
+        <span class="msg-time">${fmtTime(m.ts)}</span>
+        ${savedMarkup}
+      </div>
+    </div>
+  `;
+}
+
+function timeLeft(savedAt){
+  const rem = AUTO_DELETE_MS - (Date.now() - savedAt);
+  const mins = Math.max(0, Math.ceil(rem/60000));
+  return 'in ' + mins + 'm';
+}
+
+function renderNewChatModal(){
+  const others = directory.filter(d=>d.username!==session.username);
+  return `
+    <div class="modal-bg" id="modalBg">
+      <div class="modal">
+        <h3>New private chat</h3>
+        <div class="modal-sub">Pick one person for a 1:1 chat, or several to start a group. Every message is sealed individually to each person's key.</div>
+        <div class="user-list">
+          ${others.length===0 ? `<div class="empty-side">Nobody else has joined yet — share this page with a friend so they can create an account.</div>` : ''}
+          ${others.map(d => `
+            <label class="user-pick">
+              <input type="checkbox" value="${escapeHtml(d.username)}" ${ui.picked.includes(d.username)?'checked':''} />
+              <div class="avatar">${escapeHtml(initials(d.displayName))}</div>
+              <div>
+                <div style="font-size:13.5px;font-weight:600;">${escapeHtml(d.displayName)}</div>
+                <div style="font-size:11px;color:var(--muted);font-family:var(--mono);">@${escapeHtml(d.username)}</div>
+              </div>
+            </label>
+          `).join('')}
+        </div>
+        ${ui.picked.length > 1 ? `<input type="text" id="groupName" placeholder="Group name" style="margin-bottom:14px;" />` : ''}
+        <div class="modal-footer">
+          <button class="btn ghost" id="modalCancel" style="flex:1;">Cancel</button>
+          <button class="btn" id="modalGo" style="flex:1;" ${ui.picked.length===0?'disabled':''}>${ui.picked.length>1?'Create group':'Start chat'}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function logoutSvg(){ return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>`; }
+function clipSvg(){ return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a5 5 0 01-7.07-7.07l9.19-9.19a3.5 3.5 0 014.95 4.95L9.41 17.86a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>`; }
+function sendSvg(){ return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0B0D12" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>`; }
+function fileSvg(){ return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>`; }
+
+// ------------------------------------------------------------- listeners
+
+function attachAppListeners(){
+  $('#btnLogout')?.addEventListener('click', logOut);
+  $('#btnNewChat')?.addEventListener('click', ()=>{ ui.showNewChat = true; ui.picked=[]; render(); });
+
+  root.querySelectorAll('.convo').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      activeConvoId = el.dataset.id;
+      await loadMessages(activeConvoId);
+      render();
+      const list = $('#msgList'); if (list) list.scrollTop = list.scrollHeight;
+    });
+  });
+
+  const msgList = $('#msgList');
+  if (msgList) msgList.scrollTop = msgList.scrollHeight;
+
+  root.querySelectorAll('[data-save-id]').forEach(el=>{
+    el.addEventListener('click', ()=> markSaved(el.dataset.saveId));
+  });
+  root.querySelectorAll('[data-download-id]').forEach(el=>{
+    el.addEventListener('click', ()=> setTimeout(()=>markSaved(el.dataset.downloadId), 300));
+  });
+
+  const textInput = $('#textInput');
+  const btnSend = $('#btnSend');
+  const fileInput = $('#fileInput');
+
+  if (textInput){
+    textInput.addEventListener('keydown', (e)=>{
+      if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); doSendText(); }
+    });
+  }
+  if (btnSend) btnSend.addEventListener('click', doSendText);
+  if (fileInput) fileInput.addEventListener('change', async (e)=>{
+    const file = e.target.files[0];
+    if (!file) return;
+    const type = file.type.startsWith('image/') ? 'image' : 'file';
+    await sendMessage({type, file});
+    fileInput.value = '';
+  });
+
+  async function doSendText(){
+    const text = textInput.value;
+    if (!text.trim()) return;
+    textInput.value = '';
+    await sendMessage({type:'text', text});
+  }
+
+  // new-chat modal
+  $('#modalBg')?.addEventListener('click', (e)=>{ if (e.target.id==='modalBg'){ ui.showNewChat=false; render(); } });
+  $('#modalCancel')?.addEventListener('click', ()=>{ ui.showNewChat=false; render(); });
+  root.querySelectorAll('.user-pick input').forEach(cb=>{
+    cb.addEventListener('change', ()=>{
+      if (cb.checked) ui.picked.push(cb.value);
+      else ui.picked = ui.picked.filter(u=>u!==cb.value);
+      ui.showNewChat = true; // keep modal open across the re-render
+      render();
+    });
+  });
+  $('#modalGo')?.addEventListener('click', async ()=>{
+    ui.showNewChat = false;
+    if (ui.picked.length === 1){
+      await openOrCreateDM(ui.picked[0]);
+    } else if (ui.picked.length > 1){
+      const name = $('#groupName')?.value || '';
+      await createGroup(name, ui.picked);
+    }
+    ui.picked = [];
+  });
+}
+
+render();
+</script>
+</body>
+</html>
