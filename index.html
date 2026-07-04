@@ -281,35 +281,13 @@
 const $ = sel => document.querySelector(sel);
 const root = $('#root');
 
-/* ── Backend configuration ──────────────────────────────────────────────
-   This app needs ONE small always-on database so that different people's
-   browsers can see the same accounts/messages. Claude's own storage bridge
-   (window.storage) only exists inside Claude's chat window — it does not
-   exist on a GitHub Pages URL, because GitHub Pages is 100% static hosting
-   with no backend of its own. So instead we talk directly to Firebase's
-   free Realtime Database over plain HTTPS (no SDK, just fetch calls) —
-   that's a real, independent, always-on service GitHub Pages CAN reach.
-
-   To activate this:
-   1. Go to https://console.firebase.google.com -> Add project (free).
-   2. In your project, open "Build -> Realtime Database" -> Create Database
-      -> start in TEST MODE (open read/write; fine here since every message
-      is already end-to-end encrypted before it ever reaches this database —
-      it only ever stores ciphertext).
-   3. Copy the Database URL (looks like https://YOUR-PROJECT-default-rtdb
-      .firebaseio.com or ...asia-southeast1.firebasedatabase.app) and paste
-      it below, replacing the placeholder.
-
-   Honest tradeoff: "test mode" rules mean anyone with this URL could also
-   write or delete data (they still can't read message content — it's
-   ciphertext). Fine for a small friend group; ask if you want it locked
-   down further later with Firebase Authentication.
+/* ── Firebase Realtime Database configuration ────────────────────────
+   This app uses the Firebase Realtime Database REST API via fetch()
+   and does not depend on the Firebase SDK.
    ------------------------------------------------------------------------ */
 const FIREBASE_DB_URL = "https://encrypted-chat-9d7ed-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-const BACKEND_CONFIGURED = typeof FIREBASE_DB_URL === 'string'
-  && FIREBASE_DB_URL.startsWith('https://')
-  && !FIREBASE_DB_URL.includes('PASTE_YOUR');
+function keyToPath(key){ return key.replace(/:/g, '/'); }
 
 function withTimeout(promise, ms, label){
   return Promise.race([
@@ -320,33 +298,71 @@ function withTimeout(promise, ms, label){
     ))
   ]);
 }
+
 const STORAGE_TIMEOUT_MS = 8000;
 
-function keyToPath(key){ return key.replace(/:/g, '/'); }
-
-async function getJSON(key, shared){
+async function getJSON(key){
   try{
-    const res = await withTimeout(fetch(FIREBASE_DB_URL + '/' + keyToPath(key) + '.json'), STORAGE_TIMEOUT_MS, 'Reading "'+key+'"');
+    const res = await withTimeout(fetch(FIREBASE_DB_URL + '/' + keyToPath(key) + '.json'), STORAGE_TIMEOUT_MS, 'Reading "' + key + '"');
     if (!res.ok) return null;
-    return await res.json(); // Firebase returns JSON `null` for a path that doesn't exist yet
-  }catch(e){ return null; }
+    return await res.json();
+  }catch(e){
+    return null;
+  }
 }
 
-async function setJSON(key, value, shared){
+async function postJSON(key, value){
   let res;
   try{
     res = await withTimeout(fetch(FIREBASE_DB_URL + '/' + keyToPath(key) + '.json', {
-      method: 'PUT',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(value)
-    }), STORAGE_TIMEOUT_MS, 'Saving "'+key+'"');
+    }), STORAGE_TIMEOUT_MS, 'Writing "' + key + '"');
   }catch(e){
     throw new Error(e.message && e.message.includes('timed out') ? e.message : 'Network error while saving — ' + (e.message || 'request failed') + '. Check your connection and try again.');
   }
   if (!res.ok){
-    throw new Error('The database rejected that save (HTTP ' + res.status + '). If you just set this up, double-check the Realtime Database rules allow writes.');
+    throw new Error('The database rejected that save (HTTP ' + res.status + ').');
   }
   return await res.json();
+}
+
+async function patchJSON(key, value){
+  let res;
+  try{
+    res = await withTimeout(fetch(FIREBASE_DB_URL + '/' + keyToPath(key) + '.json', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(value)
+    }), STORAGE_TIMEOUT_MS, 'Updating "' + key + '"');
+  }catch(e){
+    throw new Error(e.message && e.message.includes('timed out') ? e.message : 'Network error while updating — ' + (e.message || 'request failed') + '. Check your connection and try again.');
+  }
+  if (!res.ok){
+    throw new Error('The database rejected that update (HTTP ' + res.status + ').');
+  }
+  return await res.json();
+}
+
+async function deleteJSON(key){
+  let res;
+  try{
+    res = await withTimeout(fetch(FIREBASE_DB_URL + '/' + keyToPath(key) + '.json', {
+      method: 'DELETE'
+    }), STORAGE_TIMEOUT_MS, 'Deleting "' + key + '"');
+  }catch(e){
+    throw new Error(e.message && e.message.includes('timed out') ? e.message : 'Network error while deleting — ' + (e.message || 'request failed') + '. Check your connection and try again.');
+  }
+  if (!res.ok){
+    throw new Error('The database rejected that delete (HTTP ' + res.status + ').');
+  }
+  return await res.json();
+}
+
+async function setJSON(key, value){
+  const existing = await getJSON(key);
+  return existing === null ? postJSON(key, value) : patchJSON(key, value);
 }
 
 const AUTO_DELETE_MS = 30 * 60 * 1000; // 30 minutes after save/download
@@ -367,6 +383,48 @@ let pollTimer = null;
 let ui = { authTab: 'login', authErr: '', busy: false, authSteps: [], showNewChat: false, picked: [] };
 
 // ---------------------------------------------------------------- helpers
+
+async function persistSessionState(){
+  if (!session.username){
+    sessionStorage.removeItem('sealed-session');
+    sessionStorage.removeItem('sealed-private-key');
+    return;
+  }
+
+  const state = {
+    username: session.username,
+    displayName: session.displayName,
+    publicKeyJwk: session.publicKeyJwk,
+    fingerprint: session.fingerprint
+  };
+  sessionStorage.setItem('sealed-session', JSON.stringify(state));
+
+  if (session.privateKey){
+    try{
+      const privateKeyJwk = await crypto.subtle.exportKey('jwk', session.privateKey);
+      sessionStorage.setItem('sealed-private-key', JSON.stringify(privateKeyJwk));
+    }catch(e){
+      sessionStorage.removeItem('sealed-private-key');
+    }
+  } else {
+    sessionStorage.removeItem('sealed-private-key');
+  }
+}
+
+async function restoreSessionState(){
+  try{
+    const state = JSON.parse(sessionStorage.getItem('sealed-session') || 'null');
+    const privateKeyJwk = JSON.parse(sessionStorage.getItem('sealed-private-key') || 'null');
+    if (!state || !privateKeyJwk) return false;
+    const privateKey = await crypto.subtle.importKey('jwk', privateKeyJwk, {name:'RSA-OAEP', hash:'SHA-256'}, true, ['decrypt']);
+    session = { ...state, privateKey };
+    return true;
+  }catch(e){
+    sessionStorage.removeItem('sealed-session');
+    sessionStorage.removeItem('sealed-private-key');
+    return false;
+  }
+}
 
 function buf2b64(buf){
   const bytes = new Uint8Array(buf);
@@ -509,6 +567,7 @@ async function signUp(username, displayName, password, onStep){
 
   onStep?.('done');
   session = { username, displayName, privateKey: keypair.privateKey, publicKeyJwk, fingerprint: fp };
+  await persistSessionState();
   await setJSON('userConvos:'+username, [], true); // shared store, so this account's conversation list is discoverable next login
 }
 
@@ -530,12 +589,15 @@ async function logIn(username, password){
   const privateKey = await crypto.subtle.importKey('jwk', privateKeyJwk, {name:'RSA-OAEP', hash:'SHA-256'}, true, ['decrypt']);
   const fp = await fingerprintOf(account.publicKeyJwk);
   session = { username, displayName: account.displayName, privateKey, publicKeyJwk: account.publicKeyJwk, fingerprint: fp };
+  await persistSessionState();
 }
 
 function logOut(){
   session = { username:null, displayName:null, privateKey:null, publicKeyJwk:null, fingerprint:null };
   convos = []; messagesCache = {}; activeConvoId = null;
   if (pollTimer) clearInterval(pollTimer);
+  sessionStorage.removeItem('sealed-session');
+  sessionStorage.removeItem('sealed-private-key');
   render();
 }
 
@@ -678,48 +740,14 @@ function startPolling(){
       if (activeConvoId) await loadMessages(activeConvoId);
       render();
     }catch(e){ /* transient network hiccup during background poll — next tick will retry */ }
-  }, 4000);
+  }, 2000);
 }
 
 // --------------------------------------------------------------- rendering
 
 function render(){
-  if (!BACKEND_CONFIGURED){ renderBackendSetup(); return; }
   if (!session.username){ renderAuth(); return; }
   renderApp();
-}
-
-function renderBackendSetup(){
-  root.innerHTML = `
-    <div class="auth-wrap">
-      <div class="auth-card">
-        <div class="term-bar">
-          <div class="term-dot" style="background:#FF5C5C;"></div>
-          <div class="term-dot" style="background:#F5C542;"></div>
-          <div class="term-dot" style="background:#00FF9C;"></div>
-          <div class="term-title">root@sealed:~$ setup</div>
-        </div>
-        <div class="auth-body">
-          <div class="auth-head">
-            <div class="seal">${sealSvg()}</div>
-            <div class="wordmark">Seal<span>ed</span></div>
-          </div>
-          <div class="boot-log" style="margin-top:14px;">
-            <div style="color:#F5C542;">✗ no database configured (FIREBASE_DB_URL is still a placeholder)</div>
-          </div>
-          <div class="auth-sub" style="margin-top:16px;">
-            This app needs one small always-on database so different people's browsers can share accounts and messages. Since this page is hosted on GitHub Pages (static files only, no backend of its own), it talks to a free Firebase Realtime Database instead.<br/><br/>
-            <strong style="color:var(--teal);">To finish setup:</strong><br/>
-            1. Go to console.firebase.google.com → create a free project<br/>
-            2. Build → Realtime Database → Create Database → start in test mode<br/>
-            3. Copy the Database URL it gives you<br/>
-            4. Paste it into the <code style="color:var(--seal);">FIREBASE_DB_URL</code> constant near the top of this file's &lt;script&gt;, replacing the placeholder text<br/><br/>
-            Every message is still encrypted in your browser before it's sent — the database only ever stores ciphertext, regardless of which backend holds it.
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 function renderAuth(){
@@ -1034,7 +1062,21 @@ function attachAppListeners(){
   });
 }
 
-render();
+async function initializeApp(){
+  const restored = await restoreSessionState();
+  if (restored){
+    try{
+      await loadDirectory();
+      await loadConvos();
+      startPolling();
+    }catch(e){
+      toast('Could not restore your previous session from this browser tab.');
+    }
+  }
+  render();
+}
+
+initializeApp();
 </script>
 </body>
 </html>
