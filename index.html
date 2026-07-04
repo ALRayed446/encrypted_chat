@@ -280,8 +280,74 @@
 
 const $ = sel => document.querySelector(sel);
 const root = $('#root');
-const STORAGE_AVAILABLE = (typeof window.storage !== 'undefined' && window.storage !== null
-  && typeof window.storage.get === 'function' && typeof window.storage.set === 'function');
+
+/* ── Backend configuration ──────────────────────────────────────────────
+   This app needs ONE small always-on database so that different people's
+   browsers can see the same accounts/messages. Claude's own storage bridge
+   (window.storage) only exists inside Claude's chat window — it does not
+   exist on a GitHub Pages URL, because GitHub Pages is 100% static hosting
+   with no backend of its own. So instead we talk directly to Firebase's
+   free Realtime Database over plain HTTPS (no SDK, just fetch calls) —
+   that's a real, independent, always-on service GitHub Pages CAN reach.
+
+   To activate this:
+   1. Go to https://console.firebase.google.com -> Add project (free).
+   2. In your project, open "Build -> Realtime Database" -> Create Database
+      -> start in TEST MODE (open read/write; fine here since every message
+      is already end-to-end encrypted before it ever reaches this database —
+      it only ever stores ciphertext).
+   3. Copy the Database URL (looks like https://YOUR-PROJECT-default-rtdb
+      .firebaseio.com or ...asia-southeast1.firebasedatabase.app) and paste
+      it below, replacing the placeholder.
+
+   Honest tradeoff: "test mode" rules mean anyone with this URL could also
+   write or delete data (they still can't read message content — it's
+   ciphertext). Fine for a small friend group; ask if you want it locked
+   down further later with Firebase Authentication.
+   ------------------------------------------------------------------------ */
+const FIREBASE_DB_URL = "https://encrypted-chat-9d7ed-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+const BACKEND_CONFIGURED = typeof FIREBASE_DB_URL === 'string'
+  && FIREBASE_DB_URL.startsWith('https://')
+  && !FIREBASE_DB_URL.includes('PASTE_YOUR');
+
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error(label + ' timed out after ' + (ms/1000) + 's — the database may be unreachable right now. Try again.')),
+      ms
+    ))
+  ]);
+}
+const STORAGE_TIMEOUT_MS = 8000;
+
+function keyToPath(key){ return key.replace(/:/g, '/'); }
+
+async function getJSON(key, shared){
+  try{
+    const res = await withTimeout(fetch(FIREBASE_DB_URL + '/' + keyToPath(key) + '.json'), STORAGE_TIMEOUT_MS, 'Reading "'+key+'"');
+    if (!res.ok) return null;
+    return await res.json(); // Firebase returns JSON `null` for a path that doesn't exist yet
+  }catch(e){ return null; }
+}
+
+async function setJSON(key, value, shared){
+  let res;
+  try{
+    res = await withTimeout(fetch(FIREBASE_DB_URL + '/' + keyToPath(key) + '.json', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(value)
+    }), STORAGE_TIMEOUT_MS, 'Saving "'+key+'"');
+  }catch(e){
+    throw new Error(e.message && e.message.includes('timed out') ? e.message : 'Network error while saving — ' + (e.message || 'request failed') + '. Check your connection and try again.');
+  }
+  if (!res.ok){
+    throw new Error('The database rejected that save (HTTP ' + res.status + '). If you just set this up, double-check the Realtime Database rules allow writes.');
+  }
+  return await res.json();
+}
 
 const AUTO_DELETE_MS = 30 * 60 * 1000; // 30 minutes after save/download
 
@@ -332,6 +398,10 @@ function toast(msg){
   t.className = 'toast'; t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(()=>t.remove(), 2400);
+}
+async function safely(fn, failMsg){
+  try{ await fn(); }
+  catch(e){ toast(failMsg || ('Connection hiccup: ' + (e.message || 'try again'))); }
 }
 
 // ------------------------------------------------------------- crypto core
@@ -387,26 +457,7 @@ async function decryptMessage(msg){
   return plain;
 }
 
-// ------------------------------------------------------------- storage io
-
-async function getJSON(key, shared){
-  try{
-    const r = await window.storage.get(key, shared);
-    return r ? JSON.parse(r.value) : null;
-  }catch(e){ return null; }
-}
-async function setJSON(key, value, shared){
-  let result;
-  try{
-    result = await window.storage.set(key, JSON.stringify(value), shared);
-  }catch(e){
-    throw new Error('Storage error while saving — ' + (e.message || 'the connection to Claude\'s storage failed') + '. Try again in a moment.');
-  }
-  if (!result){
-    throw new Error('Storage rejected the save. This usually means the storage backend is unavailable right now — try again in a moment.');
-  }
-  return result;
-}
+// ------------------------------------------------------------- directory
 
 async function loadDirectory(){
   directory = (await getJSON('directory', true)) || [];
@@ -622,21 +673,23 @@ function startPolling(){
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async ()=>{
     if (!session.username) return;
-    await loadConvos();
-    if (activeConvoId) await loadMessages(activeConvoId);
-    render();
+    try{
+      await loadConvos();
+      if (activeConvoId) await loadMessages(activeConvoId);
+      render();
+    }catch(e){ /* transient network hiccup during background poll — next tick will retry */ }
   }, 4000);
 }
 
 // --------------------------------------------------------------- rendering
 
 function render(){
-  if (!STORAGE_AVAILABLE){ renderStorageError(); return; }
+  if (!BACKEND_CONFIGURED){ renderBackendSetup(); return; }
   if (!session.username){ renderAuth(); return; }
   renderApp();
 }
 
-function renderStorageError(){
+function renderBackendSetup(){
   root.innerHTML = `
     <div class="auth-wrap">
       <div class="auth-card">
@@ -644,7 +697,7 @@ function renderStorageError(){
           <div class="term-dot" style="background:#FF5C5C;"></div>
           <div class="term-dot" style="background:#F5C542;"></div>
           <div class="term-dot" style="background:#00FF9C;"></div>
-          <div class="term-title">root@sealed:~$ status</div>
+          <div class="term-title">root@sealed:~$ setup</div>
         </div>
         <div class="auth-body">
           <div class="auth-head">
@@ -652,13 +705,16 @@ function renderStorageError(){
             <div class="wordmark">Seal<span>ed</span></div>
           </div>
           <div class="boot-log" style="margin-top:14px;">
-            <div class="done">checking storage backend</div>
-            <div style="color:#FF5C5C;">✗ window.storage is not available in this window</div>
+            <div style="color:#F5C542;">✗ no database configured (FIREBASE_DB_URL is still a placeholder)</div>
           </div>
           <div class="auth-sub" style="margin-top:16px;">
-            This app needs Claude's shared storage to create accounts and sync messages between people — and that bridge is only active when this file is opened <strong style="color:var(--teal);">through the Claude.ai conversation itself</strong> (the preview panel, or a link Claude shares in chat).<br/><br/>
-            It will <em>not</em> work if the .html file has been downloaded and opened directly on your computer, or uploaded to a static host like GitHub Pages — there's no server behind it in that case, so accounts can't be created or shared between people.<br/><br/>
-            Open this from the chat where I built it for you, and it should work. If you're already doing that and still seeing this, tell me — that would mean something else is going on and I'll dig further.
+            This app needs one small always-on database so different people's browsers can share accounts and messages. Since this page is hosted on GitHub Pages (static files only, no backend of its own), it talks to a free Firebase Realtime Database instead.<br/><br/>
+            <strong style="color:var(--teal);">To finish setup:</strong><br/>
+            1. Go to console.firebase.google.com → create a free project<br/>
+            2. Build → Realtime Database → Create Database → start in test mode<br/>
+            3. Copy the Database URL it gives you<br/>
+            4. Paste it into the <code style="color:var(--seal);">FIREBASE_DB_URL</code> constant near the top of this file's &lt;script&gt;, replacing the placeholder text<br/><br/>
+            Every message is still encrypted in your browser before it's sent — the database only ever stores ciphertext, regardless of which backend holds it.
           </div>
         </div>
       </div>
@@ -910,9 +966,11 @@ function attachAppListeners(){
   root.querySelectorAll('.convo').forEach(el=>{
     el.addEventListener('click', async ()=>{
       activeConvoId = el.dataset.id;
-      await loadMessages(activeConvoId);
-      render();
-      const list = $('#msgList'); if (list) list.scrollTop = list.scrollHeight;
+      await safely(async ()=>{
+        await loadMessages(activeConvoId);
+        render();
+        const list = $('#msgList'); if (list) list.scrollTop = list.scrollHeight;
+      }, 'Could not load that conversation — check your connection and try again.');
     });
   });
 
@@ -920,10 +978,10 @@ function attachAppListeners(){
   if (msgList) msgList.scrollTop = msgList.scrollHeight;
 
   root.querySelectorAll('[data-save-id]').forEach(el=>{
-    el.addEventListener('click', ()=> markSaved(el.dataset.saveId));
+    el.addEventListener('click', ()=> safely(()=>markSaved(el.dataset.saveId), 'Could not save that message right now.'));
   });
   root.querySelectorAll('[data-download-id]').forEach(el=>{
-    el.addEventListener('click', ()=> setTimeout(()=>markSaved(el.dataset.downloadId), 300));
+    el.addEventListener('click', ()=> setTimeout(()=>safely(()=>markSaved(el.dataset.downloadId), 'Could not mark that download as saved.'), 300));
   });
 
   const textInput = $('#textInput');
@@ -940,7 +998,7 @@ function attachAppListeners(){
     const file = e.target.files[0];
     if (!file) return;
     const type = file.type.startsWith('image/') ? 'image' : 'file';
-    await sendMessage({type, file});
+    await safely(async ()=>{ await sendMessage({type, file}); }, 'Could not send that file — check your connection and try again.');
     fileInput.value = '';
   });
 
@@ -948,7 +1006,7 @@ function attachAppListeners(){
     const text = textInput.value;
     if (!text.trim()) return;
     textInput.value = '';
-    await sendMessage({type:'text', text});
+    await safely(async ()=>{ await sendMessage({type:'text', text}); }, 'Message did not send — check your connection and try again.');
   }
 
   // new-chat modal
@@ -964,12 +1022,14 @@ function attachAppListeners(){
   });
   $('#modalGo')?.addEventListener('click', async ()=>{
     ui.showNewChat = false;
-    if (ui.picked.length === 1){
-      await openOrCreateDM(ui.picked[0]);
-    } else if (ui.picked.length > 1){
-      const name = $('#groupName')?.value || '';
-      await createGroup(name, ui.picked);
-    }
+    await safely(async ()=>{
+      if (ui.picked.length === 1){
+        await openOrCreateDM(ui.picked[0]);
+      } else if (ui.picked.length > 1){
+        const name = $('#groupName')?.value || '';
+        await createGroup(name, ui.picked);
+      }
+    }, 'Could not start that chat — check your connection and try again.');
     ui.picked = [];
   });
 }
