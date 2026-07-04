@@ -1,0 +1,12 @@
+const APP_CONFIG = {
+  FIREBASE_DB_URL: 'https://encrypted-chat-9d7ed-default-rtdb.asia-southeast1.firebasedatabase.app',
+  STORAGE_TIMEOUT_MS: 8000,
+  AUTO_DELETE_MS: 30 * 60 * 1000,
+  POLL_INTERVAL_MS: 4000,
+  MAX_FILE_SIZE_BYTES: 3 * 1024 * 1024,
+  PBKDF2_ITERATIONS: 250000,
+  RSA_MODULUS_LENGTH: 2048,
+  AES_GCM_TAG_BYTES: 16,
+  MAX_MESSAGE_PREVIEW_LENGTH: 120,
+  DEV_MODE: false
+};
