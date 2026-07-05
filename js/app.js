@@ -717,3 +717,7 @@ function attachAppListeners(){
 }
 
 render();
+// --- Initialize app after DOM is fully loaded ---
+document.addEventListener('DOMContentLoaded', () => {
+  render();
+});
