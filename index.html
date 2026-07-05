@@ -1,38 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <meta http-equiv="Content-Security-Policy"
-          content="
-            default-src 'self' https:;
-            script-src 'self' 'unsafe-inline' https:;
-            style-src 'self' 'unsafe-inline' https:;
-            img-src 'self' data: blob: https:;
-            connect-src 'self' https:;
-            font-src 'self' https: data:;
-            frame-src 'none';
-            object-src 'none';
-            base-uri 'self';
-          ">
-
-    <title>Sealed — Private End-to-End Chat</title>
-
-    <!-- CSS -->
-    <link rel="stylesheet" href="./css/app.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' https:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; connect-src 'self' https:; frame-src 'none'; object-src 'none'; base-uri 'self';">
+  <title>Sealed — private, end-to-end</title>
+  <!-- FIX: load CSS from css/ folder -->
+  <link rel="stylesheet" href="./css/app.css">
 </head>
-
 <body>
-
-    <div id="root"></div>
-
-    <!-- JavaScript -->
-    <script src="./js/config.js"></script>
-    <script src="./js/utils.js"></script>
-    <script src="./js/firebase.js"></script>
-    <script src="./js/crypto.js"></script>
-    <script src="./js/app.js"></script>
-
+  <div id="root"></div>
+  <!-- FIX: load JS from js/ folder -->
+  <script src="./js/config.js"></script>
+  <script src="./js/utils.js"></script>
+  <script src="./js/firebase.js"></script>
+  <script src="./js/crypto.js"></script>
+  <script src="./js/app.js"></script>
 </body>
 </html>
