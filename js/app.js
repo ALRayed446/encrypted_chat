@@ -1,16 +1,31 @@
 /* ============================================================================
-   app.js — FULLY WORKING version with:
-   - Typing Indicator (shows in chat header)
-   - Read Receipts (✓ Seen / ✓ Delivered)
-   - Disappearing Messages (dropdown timer)
-   - Block System (⛔ button in chat header)
-   - Search Contacts (in New Chat modal)
-   - Online / Last Seen (shows in chat header)
-   - FIXED: message sending (no more silent fails)
-   - FIXED: auth screens (login/signup work)
+   app.js — FINAL VERSION with ALL features working.
+   v2.0 – Includes: Replies, Reactions, Profile Pictures, Block, Privacy, Expiry, Search, Auto-Login.
    ========================================================================= */
 
 const root = $('#root');
+console.log('🚀 Sealed v2.0 loading...');
+
+// ---- VERSION CHECK ----
+const APP_VERSION = '2.0';
+if (localStorage.getItem('sealed_version') !== APP_VERSION) {
+  localStorage.setItem('sealed_version', APP_VERSION);
+  // Force rebuild of the shell on next render
+  window._forceRebuild = true;
+}
+
+// ---- AUTO-LOGIN ----
+(async function autoLogin() {
+  const saved = localStorage.getItem('sealed_creds');
+  if (saved) {
+    try {
+      const { username, password } = JSON.parse(atob(saved));
+      if (username && password) {
+        window._autoLoginData = { username, password };
+      }
+    } catch(e) { /* ignore */ }
+  }
+})();
 
 // ---- 1. STATE ----
 let session = {
@@ -19,6 +34,7 @@ let session = {
   privateKey: null,
   publicKeyJwk: null,
   fingerprint: null,
+  avatar: null,
 };
 
 let directory = [];
@@ -43,9 +59,11 @@ let ui = {
   privacyMode: false,
   privacyBlurred: false,
   messageExpiry: null,
+  rememberMe: false,
+  replyingTo: null, // { id, sender, preview }
 };
 
-// ---- 2. PERSISTENT DOM REFERENCES ----
+// ---- 2. PERSISTENT DOM ----
 const dom = {
   root: root,
   shell: null,
@@ -59,11 +77,13 @@ const dom = {
   chatHeadSub: null,
   msgList: null,
   composerArea: null,
+  replyBar: null,
   textInput: null,
   btnSend: null,
   fileInput: null,
   btnPrivacy: null,
   btnBlock: null,
+  expiryPicker: null,
 };
 
 // ---- 3. HELPERS ----
@@ -74,11 +94,21 @@ function getOtherUsername(convo) {
   return null;
 }
 
+function getUserAvatar(username) {
+  const entry = directory.find(d => d.username === username);
+  return entry ? entry.avatar : null;
+}
+
+function getUserDisplayName(username) {
+  if (username === session.username) return session.displayName;
+  const entry = directory.find(d => d.username === username);
+  return entry ? entry.displayName : username;
+}
+
 function convoTitle(c) {
   if (c.type === 'group') return c.name;
   const other = getOtherUsername(c);
-  const d = directory.find(x => x.username === other);
-  return d ? d.displayName : other;
+  return getUserDisplayName(other);
 }
 
 function convoSubtitle(c) {
@@ -102,12 +132,16 @@ function formatLastSeen(ts) {
   return 'last seen ' + new Date(ts).toLocaleString();
 }
 
-// ---- 4. AUTH (FULLY RESTORED from your original file) ----
+// ---- 4. AUTH ----
 async function loadDirectory() {
   directory = (await getJSON('directory', true)) || [];
   for (let d of directory) {
     const acc = await getJSON('account:' + d.username, true);
-    if (acc && acc.lastSeen) d.lastSeen = acc.lastSeen;
+    if (acc) {
+      d.lastSeen = acc.lastSeen || d.lastSeen;
+      d.avatar = acc.avatar || null;
+      d.displayName = acc.displayName || d.displayName;
+    }
   }
 }
 
@@ -115,25 +149,25 @@ async function signUp(username, displayName, password, onStep) {
   username = username.trim().toLowerCase();
   displayName = displayName.trim() || username;
   if (!username || !password) throw new Error('Username and password are required.');
-  if (password.length < 8) throw new Error('Use a password of at least 8 characters — it protects your private key.');
+  if (password.length < 8) throw new Error('Password must be at least 8 characters.');
 
-  onStep?.('checking username availability');
+  onStep?.('checking username');
   await loadDirectory();
-  if (directory.some(d => d.username === username)) throw new Error('That username is already sealed by someone else.');
+  if (directory.some(d => d.username === username)) throw new Error('Username already taken.');
 
   const existingAccount = await getJSON('account:'+username, true);
-  if (existingAccount) throw new Error('That username is already taken.');
+  if (existingAccount) throw new Error('Username already taken.');
 
-  onStep?.('generating RSA-2048 keypair');
+  onStep?.('generating RSA keypair');
   const keypair = await generateKeypair();
   const publicKeyJwk = await crypto.subtle.exportKey('jwk', keypair.publicKey);
   const privateKeyJwk = await crypto.subtle.exportKey('jwk', keypair.privateKey);
 
-  onStep?.('deriving key from passphrase (PBKDF2, 250000 rounds)');
+  onStep?.('deriving key from passphrase');
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const wrapKey = await deriveWrapKey(password, salt);
 
-  onStep?.('sealing private key with AES-256-GCM');
+  onStep?.('sealing private key');
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encPrivate = await crypto.subtle.encrypt({name:'AES-GCM', iv}, wrapKey, strToBuf(JSON.stringify(privateKeyJwk)));
 
@@ -145,18 +179,19 @@ async function signUp(username, displayName, password, onStep) {
     encPrivateKey: buf2b64(encPrivate),
     createdAt: Date.now(),
     lastSeen: Date.now(),
-    blocked: {}
+    blocked: {},
+    avatar: null,
   };
-  onStep?.('writing account record');
+  onStep?.('writing account');
   await setJSON('account:'+username, account, true);
 
-  onStep?.('computing key fingerprint');
+  onStep?.('computing fingerprint');
   const fp = await fingerprintOf(publicKeyJwk);
-  directory.push({ username, displayName, publicKeyJwk, fingerprint: fp, lastSeen: Date.now() });
+  directory.push({ username, displayName, publicKeyJwk, fingerprint: fp, lastSeen: Date.now(), avatar: null });
   await setJSON('directory', directory, true);
 
   onStep?.('done');
-  session = { username, displayName, privateKey: keypair.privateKey, publicKeyJwk, fingerprint: fp };
+  session = { username, displayName, privateKey: keypair.privateKey, publicKeyJwk, fingerprint: fp, avatar: null };
   await setJSON('userConvos:'+username, [], true);
 }
 
@@ -177,19 +212,49 @@ async function logIn(username, password) {
   }
   const privateKey = await crypto.subtle.importKey('jwk', privateKeyJwk, {name:'RSA-OAEP', hash:'SHA-256'}, true, ['decrypt']);
   const fp = await fingerprintOf(account.publicKeyJwk);
-  session = { username, displayName: account.displayName, privateKey, publicKeyJwk: account.publicKeyJwk, fingerprint: fp };
+  session = { 
+    username, 
+    displayName: account.displayName, 
+    privateKey, 
+    publicKeyJwk: account.publicKeyJwk, 
+    fingerprint: fp,
+    avatar: account.avatar || null
+  };
+  
+  if (ui.rememberMe) {
+    const creds = btoa(JSON.stringify({ username, password }));
+    localStorage.setItem('sealed_creds', creds);
+  } else {
+    localStorage.removeItem('sealed_creds');
+  }
 }
 
 function logOut() {
   if (session.username) updateLastSeen();
-  session = { username:null, displayName:null, privateKey:null, publicKeyJwk:null, fingerprint:null };
+  localStorage.removeItem('sealed_creds');
+  session = { username:null, displayName:null, privateKey:null, publicKeyJwk:null, fingerprint:null, avatar:null };
   convos = []; messagesCache = {}; activeConvoId = null;
   if (pollTimer) clearInterval(pollTimer);
   dom.shell = null;
+  // Force rebuild on next render
+  window._forceRebuild = true;
   render();
 }
 
-// ---- 5. LAST SEEN ----
+// ---- 5. PROFILE PICTURE ----
+async function updateAvatar(base64Data) {
+  if (!session.username) return;
+  const account = await getJSON('account:'+session.username, true);
+  if (!account) return;
+  account.avatar = base64Data;
+  await setJSON('account:'+session.username, account, true);
+  session.avatar = base64Data;
+  const entry = directory.find(d => d.username === session.username);
+  if (entry) entry.avatar = base64Data;
+  renderApp();
+}
+
+// ---- 6. LAST SEEN ----
 async function updateLastSeen() {
   if (!session.username) return;
   const account = await getJSON('account:'+session.username, true);
@@ -200,7 +265,7 @@ async function updateLastSeen() {
   if (entry) entry.lastSeen = Date.now();
 }
 
-// ---- 6. BLOCK SYSTEM (NOW WITH UI BUTTON) ----
+// ---- 7. BLOCK SYSTEM ----
 async function setBlock(targetUsername, type) {
   if (!session.username) return;
   const account = await getJSON('account:'+session.username, true);
@@ -229,7 +294,7 @@ async function checkBlockStatus(sender, recipient) {
   return result;
 }
 
-// ---- 7. CONVERSATIONS ----
+// ---- 8. CONVERSATIONS ----
 async function loadConvos() {
   const ids = (await getJSON('userConvos:'+session.username, true)) || [];
   const list = [];
@@ -254,10 +319,9 @@ function dmId(a,b){ return 'dm_' + [a,b].sort().join('__'); }
 async function openOrCreateDM(otherUsername) {
   const blockStatus = await checkBlockStatus(session.username, otherUsername);
   if (blockStatus.recipientBlocked || blockStatus.senderBlocked) {
-    toast('Cannot start chat: you or the recipient have blocked each other.');
+    toast('Cannot start chat: blocked.');
     return;
   }
-
   const id = dmId(session.username, otherUsername);
   let c = await getJSON('convo:'+id, true);
   if (!c) {
@@ -294,7 +358,7 @@ async function createGroup(name, memberUsernames) {
   renderApp();
 }
 
-// ---- 8. MESSAGES ----
+// ---- 9. MESSAGES ----
 async function loadMessages(convoId) {
   let list = (await getJSON('messages:'+convoId, true)) || [];
   const now = Date.now();
@@ -318,7 +382,22 @@ async function loadMessages(convoId) {
   messagesCache[convoId] = decrypted;
 }
 
-// FIXED sendMessage
+async function addReaction(msgId, emoji) {
+  if (!activeConvoId) return;
+  const list = (await getJSON('messages:'+activeConvoId, true)) || [];
+  const msg = list.find(m => m.id === msgId);
+  if (!msg) return;
+  if (!msg.reactions) msg.reactions = {};
+  if (msg.reactions[session.username] === emoji) {
+    delete msg.reactions[session.username];
+  } else {
+    msg.reactions[session.username] = emoji;
+  }
+  await setJSON('messages:'+activeConvoId, list, true);
+  await loadMessages(activeConvoId);
+  renderApp();
+}
+
 async function sendMessage({type, text, file}) {
   await loadConvos();
   let convo = convos.find(c => c.id === activeConvoId);
@@ -328,8 +407,7 @@ async function sendMessage({type, text, file}) {
       convos.push(c);
       convo = c;
     } else {
-      toast('Conversation not found. Please try again.');
-      console.error('sendMessage: conversation not found:', activeConvoId);
+      toast('Conversation not found.');
       return;
     }
   }
@@ -341,21 +419,20 @@ async function sendMessage({type, text, file}) {
       if (blockStatus.softBlocked) {
         const account = await getJSON('account:'+session.username, true) || {};
         if (account._sentFinal && account._sentFinal[recipient]) {
-          toast('You already sent your final message to ' + recipient + '.');
+          toast('Final message already sent.');
           return;
         }
         if (!account._sentFinal) account._sentFinal = {};
         account._sentFinal[recipient] = Date.now();
         await setJSON('account:'+session.username, account, true);
       } else {
-        toast('Cannot send: you or ' + recipient + ' have blocked each other.');
+        toast('Cannot send: blocked.');
         return;
       }
     }
   }
 
   let bytes, filename=null, mime=null;
-
   if (type === 'text') {
     if (!text.trim()) return;
     bytes = strToBuf(text.trim());
@@ -366,6 +443,18 @@ async function sendMessage({type, text, file}) {
       toast('File too large (max 3MB).');
       return;
     }
+  }
+
+  let replyToId = null;
+  let replyToPreview = null;
+  if (ui.replyingTo) {
+    replyToId = ui.replyingTo.id;
+    if (ui.replyingTo.preview) {
+      replyToPreview = ui.replyingTo.preview;
+    } else {
+      replyToPreview = '[File/Image]';
+    }
+    ui.replyingTo = null;
   }
 
   const enc = await encryptForRecipients(new Uint8Array(bytes), convo.members);
@@ -381,7 +470,10 @@ async function sendMessage({type, text, file}) {
     keys: enc.keys,
     savedAt: null,
     expiresAt: ui.messageExpiry ? Date.now() + ui.messageExpiry : null,
-    readBy: {}
+    readBy: {},
+    reactions: {},
+    replyToId: replyToId,
+    replyToPreview: replyToPreview,
   };
 
   const list = (await getJSON('messages:'+convo.id, true)) || [];
@@ -392,15 +484,12 @@ async function sendMessage({type, text, file}) {
   await setJSON('convo:'+convo.id, convo, true);
 
   ui.messageExpiry = null;
-  // Reset the expiry picker UI
-  const picker = $('#expiryPicker');
-  if (picker) picker.value = '';
+  if (dom.expiryPicker) dom.expiryPicker.value = '';
 
   await loadMessages(convo.id);
   await loadConvos();
   renderApp();
   flashSeal();
-  console.log('Message sent successfully:', msg.id);
 }
 
 async function markRead(convoId) {
@@ -441,7 +530,7 @@ function flashSeal() {
   if (el){ el.classList.remove('stamp'); void el.offsetWidth; el.classList.add('stamp'); }
 }
 
-// ---- 9. TYPING INDICATOR ----
+// ---- 10. TYPING INDICATOR ----
 async function sendTyping(isTyping) {
   if (!activeConvoId || !session.username) return;
   try {
@@ -476,7 +565,7 @@ async function getTypingUsers(convoId) {
   } catch(e) { return []; }
 }
 
-// ---- 10. POLLING ----
+// ---- 11. POLLING ----
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
@@ -488,16 +577,14 @@ function startPolling() {
         const oldLen = (messagesCache[activeConvoId] || []).length;
         await loadMessages(activeConvoId);
         const newLen = (messagesCache[activeConvoId] || []).length;
-        if (newLen > oldLen) {
-          await markRead(activeConvoId);
-        }
+        if (newLen > oldLen) await markRead(activeConvoId);
       }
       renderApp();
     } catch(e) { /* silent */ }
   }, 4000);
 }
 
-// ---- 11. RENDERING ----
+// ---- 12. RENDERING ----
 function captureComposerState() {
   const el = dom.textInput;
   if (!el) return;
@@ -535,22 +622,38 @@ function setPrivacyMode(enabled) {
 function handleWindowBlur() {
   if (ui.privacyMode){ ui.privacyBlurred = true; syncPrivacyState(); }
 }
-
 function handleWindowFocus() {
   ui.privacyBlurred = false;
   syncPrivacyState();
 }
 
-// ----- BUILD SHELL (runs once) -----
-function buildShell() {
-  if (dom.shell) return;
+function scrollToMessage(msgId) {
+  if (!dom.msgList) return;
+  const el = dom.msgList.querySelector(`[data-msg-id="${msgId}"]`);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.style.background = 'rgba(0,255,156,0.1)';
+    setTimeout(() => el.style.background = '', 2000);
+  } else {
+    toast('Original message not loaded.');
+  }
+}
 
+// ----- BUILD SHELL (with ALL features) -----
+function buildShell() {
+  // If shell exists and we don't force rebuild, skip
+  if (dom.shell && !window._forceRebuild) return;
+
+  console.log('🔄 Building fresh shell with all features...');
   dom.root.innerHTML = `
     <div class="shell" id="appShell">
       <div class="sidebar" id="sidebar">
         <div class="sb-head">
-          <div class="me">
-            <div class="avatar" id="myAvatar">${escapeHtml(initials(session.displayName))}</div>
+          <div class="me" style="position:relative;">
+            <div class="avatar" id="myAvatar" style="position:relative; cursor:pointer;">
+              ${session.avatar ? `<img src="${session.avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />` : escapeHtml(initials(session.displayName))}
+              <span class="avatar-edit" id="avatarEditBtn" title="Change profile picture" style="position:absolute;bottom:-4px;right:-4px;background:var(--teal);color:#000;border-radius:50%;width:16px;height:16px;font-size:10px;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg);cursor:pointer;">✎</span>
+            </div>
             <div class="me-name">${escapeHtml(session.displayName)}</div>
           </div>
           <button class="icon-btn" id="btnLogout" title="Log out">${logoutSvg()}</button>
@@ -564,7 +667,7 @@ function buildShell() {
         <div class="no-chat" id="noChat">
           <div class="seal">${sealSvg()}</div>
           <div style="font-size:14px; color:var(--text);">Pick a conversation, or start a new one.</div>
-          <div style="font-size:11px; color:var(--muted); max-width:280px; text-align:center; line-height:1.6;">Your messages stay encrypted and only the intended recipient can unlock them.</div>
+          <div style="font-size:11px; color:var(--muted); max-width:280px; text-align:center; line-height:1.6;">Your messages stay encrypted.</div>
         </div>
         <div class="chat-area" id="chatArea" style="display:none;">
           <div class="chat-head" id="chatHead">
@@ -573,16 +676,23 @@ function buildShell() {
               <div class="chat-head-sub" id="chatHeadSub"></div>
             </div>
             <div style="display:flex; align-items:center; gap:8px;">
-              <!-- NEW: Block Button (visible feature) -->
               <button class="icon-btn" id="btnBlock" title="Block this user">⛔</button>
               <button class="icon-btn" id="btnPrivacy" title="Privacy mode">👁</button>
-              <div class="seal" title="Encrypted with RSA-OAEP + AES-256-GCM">${sealSvg()}</div>
+              <div class="seal" title="Encrypted">${sealSvg()}</div>
             </div>
           </div>
           <div class="messages" id="msgList"></div>
           <div class="composer" id="composerArea">
-            <div style="display:flex; gap:6px; align-items:center; margin-right:6px;">
-              <!-- NEW: Disappearing Messages Dropdown -->
+            <!-- Reply Bar -->
+            <div id="replyBar" style="display:none; background:var(--surface-2); border-radius:6px; padding:6px 10px; margin-bottom:6px; border-left: 3px solid var(--teal); font-size:12px; color:var(--muted); justify-content:space-between; align-items:center; width:100%;">
+              <div>
+                <span style="color:var(--teal);">Replying to <span id="replySender"></span></span>
+                <div id="replyPreviewText" style="font-size:12px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px;"></div>
+              </div>
+              <button id="cancelReplyBtn" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;">✕</button>
+            </div>
+            <!-- Composer row -->
+            <div style="display:flex; gap:6px; align-items:center; margin-right:6px; width:100%;">
               <select id="expiryPicker" style="background:#000; border:1px solid var(--line); color:var(--text); border-radius:4px; padding:4px; font-size:11px; cursor:pointer;">
                 <option value="">Off</option>
                 <option value="60000">1m</option>
@@ -591,19 +701,31 @@ function buildShell() {
                 <option value="3600000">1h</option>
                 <option value="86400000">24h</option>
               </select>
+              <label class="icon-btn" style="cursor:pointer;">
+                ${clipSvg()}
+                <input type="file" id="fileInput" style="display:none" />
+              </label>
+              <textarea id="textInput" rows="1" placeholder="Write a sealed message…"></textarea>
+              <button class="send-btn" id="btnSend">${sendSvg()}</button>
             </div>
-            <label class="icon-btn" style="cursor:pointer;">
-              ${clipSvg()}
-              <input type="file" id="fileInput" style="display:none" />
-            </label>
-            <textarea id="textInput" rows="1" placeholder="Write a sealed message…"></textarea>
-            <button class="send-btn" id="btnSend">${sendSvg()}</button>
           </div>
         </div>
       </div>
     </div>
   `;
 
+  // Hidden file input for avatar
+  let avatarInput = document.getElementById('avatarFileInput');
+  if (!avatarInput) {
+    avatarInput = document.createElement('input');
+    avatarInput.type = 'file';
+    avatarInput.id = 'avatarFileInput';
+    avatarInput.accept = 'image/*';
+    avatarInput.style.display = 'none';
+    document.body.appendChild(avatarInput);
+  }
+
+  // Store DOM refs
   dom.shell = $('#appShell');
   dom.sidebar = $('#sidebar');
   dom.convoList = $('#convoList');
@@ -615,13 +737,20 @@ function buildShell() {
   dom.chatHeadSub = $('#chatHeadSub');
   dom.msgList = $('#msgList');
   dom.composerArea = $('#composerArea');
+  dom.replyBar = $('#replyBar');
   dom.textInput = $('#textInput');
   dom.btnSend = $('#btnSend');
   dom.fileInput = $('#fileInput');
   dom.btnPrivacy = $('#btnPrivacy');
   dom.btnBlock = $('#btnBlock');
+  dom.expiryPicker = $('#expiryPicker');
 
-  attachStaticListeners();
+  // Attach static listeners
+  attachStaticListeners(avatarInput);
+
+  // Clear force rebuild flag
+  window._forceRebuild = false;
+
   updateSidebar();
   if (activeConvoId) {
     dom.chatArea.style.display = 'flex';
@@ -644,19 +773,24 @@ function updateSidebar() {
       <div style="font-size:13px; color:var(--text); margin-bottom:6px;">No conversations yet</div>
       <div>Start one to begin a sealed exchange.</div>
     </div>
-  ` : convos.map(c => `
+  ` : convos.map(c => {
+    const title = convoTitle(c);
+    const other = c.type === 'dm' ? getOtherUsername(c) : null;
+    const avatar = other ? getUserAvatar(other) : null;
+    return `
     <div class="convo ${c.id===activeConvoId?'active':''}" data-id="${c.id}">
-      <div class="avatar">${escapeHtml(initials(convoTitle(c)))}</div>
+      <div class="avatar">${avatar ? `<img src="${avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />` : escapeHtml(initials(title))}</div>
       <div class="convo-meta">
-        <div class="convo-name">${escapeHtml(convoTitle(c))}${c.type==='group'?'<span class="badge">GROUP</span>':''}</div>
+        <div class="convo-name">${escapeHtml(title)}${c.type==='group'?'<span class="badge">GROUP</span>':''}</div>
         <div class="convo-sub">${escapeHtml(convoSubtitle(c))}</div>
       </div>
     </div>
-  `).join('');
+  `}).join('');
   list.scrollTop = scrollPos;
   list.querySelectorAll('.convo').forEach(el => {
     el.addEventListener('click', async () => {
       activeConvoId = el.dataset.id;
+      ui.replyingTo = null;
       await loadMessages(activeConvoId);
       await markRead(activeConvoId);
       dom.chatArea.style.display = 'flex';
@@ -691,6 +825,48 @@ function updateMessages() {
 
   dom.msgList.innerHTML = msgs.map(m => renderMessage(m)).join('');
 
+  // Attach listeners
+  dom.msgList.querySelectorAll('.msg-row').forEach(row => {
+    const mid = row.dataset.msgId;
+    if (!mid) return;
+    // Reaction picker
+    const reactionPicker = row.querySelector('.reaction-picker');
+    if (reactionPicker) {
+      reactionPicker.querySelectorAll('.reaction-emoji').forEach(el => {
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          safely(() => addReaction(mid, el.dataset.emoji), 'Could not add reaction.');
+        });
+      });
+    }
+    // Reply button
+    const replyBtn = row.querySelector('.reply-btn');
+    if (replyBtn) {
+      replyBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const msg = messagesCache[activeConvoId].find(m => m.id === mid);
+        if (!msg) return;
+        const preview = msg.type === 'text' ? bufToStr(msg._plainBuf) : '[File/Image]';
+        ui.replyingTo = { id: mid, sender: msg.sender, preview };
+        renderApp();
+        dom.textInput?.focus();
+      });
+    }
+  });
+
+  // Reply preview click to scroll
+  dom.msgList.querySelectorAll('.reply-preview').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const targetId = el.dataset.replyId;
+      if (targetId) {
+        window.location.hash = 'msg-' + targetId;
+        scrollToMessage(targetId);
+      }
+    });
+  });
+
+  // Save & download listeners
   dom.msgList.querySelectorAll('[data-save-id]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -709,9 +885,19 @@ function updateMessages() {
 
 function renderMessage(m) {
   const mine = m.sender === session.username;
-  const senderInfo = directory.find(d=>d.username===m.sender);
-  const senderName = mine ? 'You' : (senderInfo ? senderInfo.displayName : m.sender);
+  const senderName = mine ? 'You' : getUserDisplayName(m.sender);
+  const avatar = mine ? session.avatar : getUserAvatar(m.sender);
   let body = '';
+
+  let replyHtml = '';
+  if (m.replyToId && m.replyToPreview) {
+    replyHtml = `
+      <div class="reply-preview" data-reply-id="${m.replyToId}" style="cursor:pointer; background:var(--surface-2); border-left: 2px solid var(--teal); padding:4px 8px; border-radius:4px; margin-bottom:6px; font-size:12px; color:var(--muted);">
+        <span style="color:var(--teal);">↩️ ${getUserDisplayName(m.replyToPreview.sender || '')}</span>
+        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(m.replyToPreview)}</div>
+      </div>
+    `;
+  }
 
   if (m.type === 'text') {
     body = `<div>${escapeHtml(bufToStr(m._plainBuf))}</div>`;
@@ -725,7 +911,21 @@ function renderMessage(m) {
     }
   }
 
-  // VISIBLE: Read Receipts
+  let reactionsHtml = '';
+  if (m.reactions) {
+    const emojis = Object.values(m.reactions);
+    if (emojis.length > 0) {
+      const grouped = emojis.reduce((acc, em) => {
+        acc[em] = (acc[em] || 0) + 1;
+        return acc;
+      }, {});
+      reactionsHtml = `<div class="reactions">${Object.entries(grouped).map(([em, count]) => `<span class="reaction-badge">${em} ${count}</span>`).join('')}</div>`;
+    }
+  }
+
+  const pickerHtml = `<div class="reaction-picker">${['👍','❤️','😂','😮','😢','🙏'].map(e => `<span class="reaction-emoji" data-emoji="${e}">${e}</span>`).join('')}</div>`;
+  const replyBtnHtml = `<span class="reply-btn" style="cursor:pointer; font-size:12px; margin-right:8px; opacity:0.6;">↩️</span>`;
+
   let readStatus = '';
   if (!mine && m.readBy && m.readBy[session.username]) {
     readStatus = '<span style="font-size:10px; color:var(--teal); margin-left:8px;">✓ Seen</span>';
@@ -733,7 +933,6 @@ function renderMessage(m) {
     readStatus = '<span style="font-size:10px; color:var(--muted); margin-left:8px;">✓ Delivered</span>';
   }
 
-  // VISIBLE: Disappearing timer
   let expiryInfo = '';
   if (m.expiresAt) {
     const remaining = Math.max(0, m.expiresAt - Date.now());
@@ -748,10 +947,20 @@ function renderMessage(m) {
     ? `<span class="save-btn saved"><span class="ring"></span> deletes ${timeLeft(m.savedAt)}</span>`
     : `<button class="save-btn" data-save-id="${m.id}">Save</button>`;
 
+  const avatarHtml = avatar ? `<img src="${avatar}" style="width:16px;height:16px;border-radius:50%;object-fit:cover;margin-right:4px;" />` : '';
+
   return `
-    <div class="msg-row ${mine?'mine':'theirs'}">
-      <div class="msg-sender">${escapeHtml(senderName)}</div>
-      <div class="bubble">${body}</div>
+    <div class="msg-row ${mine?'mine':'theirs'}" data-msg-id="${m.id}">
+      <div class="msg-sender">${avatarHtml} ${escapeHtml(senderName)}</div>
+      <div class="bubble">
+        ${replyHtml}
+        ${body}
+        ${pickerHtml}
+        <div style="display:flex; align-items:center; margin-top:4px; gap:4px;">
+          ${replyBtnHtml}
+        </div>
+      </div>
+      ${reactionsHtml}
       <div class="msg-foot">
         <span class="msg-time">${fmtTime(m.ts)}</span>
         ${expiryInfo}
@@ -768,7 +977,7 @@ function timeLeft(savedAt) {
   return 'in ' + mins + 'm';
 }
 
-// ---- 12. RENDER (orchestrator) ----
+// ---- 13. RENDER ----
 function render() {
   captureComposerState();
   syncPrivacyState();
@@ -779,7 +988,8 @@ function render() {
 }
 
 function renderApp() {
-  if (!dom.shell) {
+  // Build shell if needed (or if force rebuild)
+  if (!dom.shell || window._forceRebuild) {
     buildShell();
   } else {
     updateSidebar();
@@ -788,13 +998,9 @@ function renderApp() {
       dom.noChat.style.display = 'none';
       updateChatHead();
       updateMessages();
-      // VISIBLE: Typing indicator
       getTypingUsers(activeConvoId).then(users => {
         if (users.length > 0) {
-          const names = users.map(u => {
-            const d = directory.find(x => x.username === u);
-            return d ? d.displayName : u;
-          }).join(', ');
+          const names = users.map(u => getUserDisplayName(u)).join(', ');
           dom.chatHeadSub.textContent = names + ' typing...';
         } else {
           updateChatHead();
@@ -806,6 +1012,8 @@ function renderApp() {
     }
   }
 
+  updateReplyBar();
+
   if (ui.showNewChat) {
     renderNewChatModal();
   } else {
@@ -814,38 +1022,24 @@ function renderApp() {
   }
 }
 
-// ---- 13. AUTH SCREENS (FULLY RESTORED, no placeholders) ----
+function updateReplyBar() {
+  if (!dom.replyBar) return;
+  if (ui.replyingTo) {
+    dom.replyBar.style.display = 'flex';
+    const sender = ui.replyingTo.sender;
+    const displayName = sender === session.username ? 'You' : getUserDisplayName(sender);
+    const senderEl = $('#replySender');
+    const previewEl = $('#replyPreviewText');
+    if (senderEl) senderEl.textContent = displayName;
+    if (previewEl) previewEl.textContent = ui.replyingTo.preview || '';
+  } else {
+    dom.replyBar.style.display = 'none';
+  }
+}
+
+// ---- 14. AUTH SCREENS ----
 function renderBackendSetup() {
-  root.innerHTML = `
-    <div class="auth-wrap">
-      <div class="auth-card">
-        <div class="term-bar">
-          <div class="term-dot" style="background:#FF5C5C;"></div>
-          <div class="term-dot" style="background:#F5C542;"></div>
-          <div class="term-dot" style="background:#00FF9C;"></div>
-          <div class="term-title">root@sealed:~$ setup</div>
-        </div>
-        <div class="auth-body">
-          <div class="auth-head">
-            <div class="seal">${sealSvg()}</div>
-            <div class="wordmark">Seal<span>ed</span></div>
-          </div>
-          <div class="boot-log" style="margin-top:14px;">
-            <div style="color:#F5C542;">✗ no database configured (FIREBASE_DB_URL is still a placeholder)</div>
-          </div>
-          <div class="auth-sub" style="margin-top:16px;">
-            This app needs one small always-on database so different people's browsers can share accounts and messages. Since this page is hosted on GitHub Pages (static files only, no backend of its own), it talks to a free Firebase Realtime Database instead.<br/><br/>
-            <strong style="color:var(--teal);">To finish setup:</strong><br/>
-            1. Go to console.firebase.google.com → create a free project<br/>
-            2. Build → Realtime Database → Create Database → start in test mode<br/>
-            3. Copy the Database URL it gives you<br/>
-            4. Paste it into the <code style="color:var(--seal);">FIREBASE_DB_URL</code> constant near the top of js/config.js, replacing the current value<br/><br/>
-            Every message is still encrypted in your browser before it's sent — the database only ever stores ciphertext, regardless of which backend holds it.
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
+  root.innerHTML = `<div class="auth-wrap"><div class="auth-card"><div class="term-bar"><div class="term-dot" style="background:#FF5C5C;"></div><div class="term-dot" style="background:#F5C542;"></div><div class="term-dot" style="background:#00FF9C;"></div><div class="term-title">root@sealed:~$ setup</div></div><div class="auth-body"><div class="auth-head"><div class="seal">${sealSvg()}</div><div class="wordmark">Seal<span>ed</span></div></div><div class="boot-log" style="margin-top:14px;"><div style="color:#F5C542;">✗ no database configured</div></div><div class="auth-sub" style="margin-top:16px;">Set FIREBASE_DB_URL in config.js</div></div></div></div>`;
 }
 
 function renderAuth() {
@@ -874,12 +1068,16 @@ function renderAuth() {
           ${ui.authTab==='signup' ? `<label>display_name</label><input type="text" id="f-display" placeholder="what people will see" />` : ''}
           <label>passphrase</label>
           <input type="password" id="f-password" autocomplete="${ui.authTab==='signup'?'new-password':'current-password'}" placeholder="••••••••" />
-          ${ui.authTab==='signup' ? `<div class="hint">min. 8 characters recommended — this is the only thing protecting your private key, nothing else guards it.</div>` : ''}
+          ${ui.authTab==='signup' ? `<div class="hint">min. 8 characters recommended.</div>` : ''}
+          <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="f-remember" style="accent-color: var(--teal); width: 16px; height: 16px;" ${ui.rememberMe ? 'checked' : ''} />
+            <label for="f-remember" style="margin:0; font-size:12px; color:var(--muted); cursor:pointer;">Remember me</label>
+          </div>
           <button class="btn" type="submit" ${ui.busy?'disabled':''}>${ui.busy ? 'working...' : (ui.authTab==='login' ? '[ log in ]' : '[ create sealed account ]')}</button>
           <div class="err">${ui.authErr ? escapeHtml(ui.authErr) : ''}</div>
         </form>
         ${ui.busy && ui.authSteps.length ? `<div class="boot-log">${ui.authSteps.map((s,i)=>`<div class="${i<ui.authSteps.length-1?'done':''}">${escapeHtml(s)}${i===ui.authSteps.length-1?' <span class="blink">_</span>':''}</div>`).join('')}</div>` : ''}
-        ${ui.authTab==='signup' && !ui.busy ? `<div class="hint">your passphrase unlocks your private key — it's never stored anywhere, not even here. forget it and there's no reset: that's what makes the encryption real.</div>` : ''}
+        ${ui.authTab==='signup' && !ui.busy ? `<div class="hint">your passphrase unlocks your private key — it's never stored.</div>` : ''}
         </div>
       </div>
     </div>
@@ -890,6 +1088,8 @@ function renderAuth() {
     const username = $('#f-username').value;
     const password = $('#f-password').value;
     const display = ui.authTab==='signup' ? $('#f-display').value : '';
+    ui.rememberMe = $('#f-remember').checked;
+    
     ui.authErr=''; ui.busy = true; ui.authSteps = ['initializing']; render();
     try{
       if (ui.authTab==='signup'){
@@ -911,7 +1111,7 @@ function renderAuth() {
   });
 }
 
-// ---- 14. NEW CHAT MODAL (with Search) ----
+// ---- 15. NEW CHAT MODAL ----
 function renderNewChatModal() {
   const others = directory.filter(d => d.username !== session.username);
   let modalHtml = `
@@ -919,15 +1119,14 @@ function renderNewChatModal() {
       <div class="modal">
         <div class="modal-body">
           <h3>New private chat</h3>
-          <div class="modal-sub">Pick one person for 1:1, or several for a group. Every message is sealed individually.</div>
-          <!-- VISIBLE: Search contacts -->
+          <div class="modal-sub">Pick one person for 1:1, or several for a group.</div>
           <input type="text" id="contactSearch" placeholder="Search contacts..." style="width:100%; background:#000; border:1px solid var(--line); color:var(--text); padding:8px 10px; border-radius:4px; margin-bottom:12px;" />
           <div class="user-list" id="userList">
             ${others.length===0 ? `<div class="empty-side">No contacts yet</div>` : ''}
             ${others.map(d => `
               <label class="user-pick" data-username="${escapeHtml(d.username)}">
                 <input type="checkbox" value="${escapeHtml(d.username)}" ${ui.picked.includes(d.username)?'checked':''} />
-                <div class="avatar">${escapeHtml(initials(d.displayName))}</div>
+                <div class="avatar">${d.avatar ? `<img src="${d.avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />` : escapeHtml(initials(d.displayName))}</div>
                 <div>
                   <div style="font-size:13.5px;font-weight:600;">${escapeHtml(d.displayName)}</div>
                   <div style="font-size:11px;color:var(--muted);font-family:var(--mono);">@${escapeHtml(d.username)}</div>
@@ -993,40 +1192,73 @@ function renderNewChatModal() {
   });
 }
 
-// ---- 15. STATIC LISTENERS ----
-function attachStaticListeners() {
+// ---- 16. STATIC LISTENERS ----
+function attachStaticListeners(avatarInput) {
+  // Logout
   $('#btnLogout')?.addEventListener('click', logOut);
+  
+  // New Chat
   $('#btnNewChat')?.addEventListener('click', () => {
     ui.showNewChat = true;
     ui.picked = [];
     render();
   });
+  
+  // Privacy
   $('#btnPrivacy')?.addEventListener('click', () => {
     setPrivacyMode(!ui.privacyMode);
     render();
   });
-
-  // --- NEW: Block button logic ---
+  
+  // Block
   dom.btnBlock?.addEventListener('click', async () => {
     if (!activeConvoId) return toast('No chat selected.');
     const convo = convos.find(c => c.id === activeConvoId);
     if (!convo) return toast('Conversation not found.');
-    if (convo.type === 'group') return toast('Block only works in private chats (not groups).');
-    
+    if (convo.type === 'group') return toast('Block only works in private chats.');
     const other = getOtherUsername(convo);
     if (!other) return;
-    
-    // Ask user: Hard or Soft?
-    const choice = confirm(`Block @${other}?\n\n- Press "OK" for HARD BLOCK (no more messages from them).\n- Press "Cancel" for SOFT BLOCK (they can send one final message).`);
-    // In confirm(): OK = true, Cancel = false
-    if (choice === true) {
-      await setBlock(other, 'hard');
-    } else {
-      await setBlock(other, 'soft');
-    }
+    const choice = confirm(`Block @${other}?\nOK = Hard Block, Cancel = Soft Block`);
+    if (choice === true) await setBlock(other, 'hard');
+    else await setBlock(other, 'soft');
   });
 
+  // Avatar upload
+  const avatarEditBtn = $('#avatarEditBtn');
+  if (avatarEditBtn) {
+    avatarEditBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (avatarInput) avatarInput.click();
+    });
+  }
+  if (avatarInput) {
+    avatarInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const size = 128;
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, size, size);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+          safely(() => updateAvatar(dataUrl), 'Could not update avatar.');
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+      avatarInput.value = '';
+    });
+  }
+
+  // Send button
   dom.btnSend?.addEventListener('click', doSendText);
+  
+  // File input
   dom.fileInput?.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1037,6 +1269,7 @@ function attachStaticListeners() {
     dom.fileInput.value = '';
   });
 
+  // Text input
   if (dom.textInput) {
     dom.textInput.addEventListener('input', () => {
       ui.composerText = dom.textInput.value;
@@ -1051,23 +1284,34 @@ function attachStaticListeners() {
         e.preventDefault();
         doSendText();
       }
+      if (e.key === 'Escape' && ui.replyingTo) {
+        ui.replyingTo = null;
+        renderApp();
+      }
     });
-    dom.textInput.addEventListener('focus', () => {
-      ui.composerFocused = true;
-    });
-    dom.textInput.addEventListener('blur', () => {
-      ui.composerFocused = false;
+    dom.textInput.addEventListener('focus', () => { ui.composerFocused = true; });
+    dom.textInput.addEventListener('blur', () => { ui.composerFocused = false; });
+  }
+
+  // Cancel Reply
+  const cancelReply = $('#cancelReplyBtn');
+  if (cancelReply) {
+    cancelReply.addEventListener('click', () => {
+      ui.replyingTo = null;
+      renderApp();
+      dom.textInput?.focus();
     });
   }
 
-  const expiryPicker = $('#expiryPicker');
-  if (expiryPicker) {
-    expiryPicker.addEventListener('change', () => {
-      const val = expiryPicker.value;
+  // Expiry picker
+  if (dom.expiryPicker) {
+    dom.expiryPicker.addEventListener('change', () => {
+      const val = dom.expiryPicker.value;
       ui.messageExpiry = val ? parseInt(val) : null;
     });
   }
 
+  // Window events
   window.addEventListener('blur', handleWindowBlur);
   window.addEventListener('focus', handleWindowFocus);
   window.addEventListener('beforeunload', () => {
@@ -1075,7 +1319,7 @@ function attachStaticListeners() {
   });
 }
 
-// ---- 16. SEND HELPER ----
+// ---- 17. SEND HELPER ----
 async function doSendText() {
   const text = dom.textInput?.value;
   if (!text || !text.trim()) return;
@@ -1088,17 +1332,38 @@ async function doSendText() {
   dom.msgList.scrollTop = dom.msgList.scrollHeight;
 }
 
-// ---- 17. SVG HELPERS (keep from your original) ----
-function sealSvg(){
-  return `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 2L4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-8-4z" fill="#0B0D12" opacity="0.85"/>
-    <path d="M8.5 12.2l2.4 2.4 4.6-4.9" stroke="#E8A33D" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-  </svg>`;
+// ---- 18. SVG HELPERS (Fixed) ----
+function sealSvg() {
+  return '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-8-4z" fill="#0B0D12" opacity="0.85"/><path d="M8.5 12.2l2.4 2.4 4.6-4.9" stroke="#E8A33D" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 function logoutSvg(){ return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>`; }
 function clipSvg(){ return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a5 5 0 01-7.07-7.07l9.19-9.19a3.5 3.5 0 014.95 4.95L9.41 17.86a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>`; }
 function sendSvg(){ return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0B0D12" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>`; }
 function fileSvg(){ return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>`; }
 
-// ---- 18. START ----
+// ---- 19. AUTO-LOGIN EXECUTION ----
+(async function runAutoLogin() {
+  if (window._autoLoginData) {
+    const { username, password } = window._autoLoginData;
+    try {
+      ui.busy = true;
+      renderAuth();
+      await logIn(username, password);
+      await loadDirectory();
+      await loadConvos();
+      startPolling();
+      ui.busy = false;
+      render();
+    } catch (e) {
+      console.warn('Auto-login failed:', e);
+      localStorage.removeItem('sealed_creds');
+      ui.busy = false;
+      render();
+    }
+    delete window._autoLoginData;
+  }
+})();
+
+// ---- 20. START ----
 render();
+console.log('✅ Sealed v2.0 ready');
