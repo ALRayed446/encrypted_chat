@@ -18,7 +18,20 @@ let convos = [];             // [{id, type, members, name, createdAt}]
 let activeConvoId = null;
 let messagesCache = {};      // convoId -> decrypted message list
 let pollTimer = null;
-let ui = { authTab: 'login', authErr: '', busy: false, authSteps: [], showNewChat: false, picked: [] };
+let ui = {
+  authTab: 'login',
+  authErr: '',
+  busy: false,
+  authSteps: [],
+  showNewChat: false,
+  picked: [],
+  composerText: '',
+  composerSelectionStart: 0,
+  composerSelectionEnd: 0,
+  composerFocused: false,
+  privacyMode: false,
+  privacyBlurred: false,
+};
 
 // ------------------------------------------------------------- directory
 
@@ -246,10 +259,64 @@ function startPolling(){
 
 // --------------------------------------------------------------- rendering
 
+function captureComposerState(){
+  const textInput = $('#textInput');
+  if (!textInput) return;
+  ui.composerText = textInput.value;
+  ui.composerSelectionStart = textInput.selectionStart ?? textInput.value.length;
+  ui.composerSelectionEnd = textInput.selectionEnd ?? textInput.value.length;
+  ui.composerFocused = document.activeElement === textInput;
+}
+
+function restoreComposerState(){
+  const textInput = $('#textInput');
+  if (!textInput) return;
+  textInput.value = ui.composerText || '';
+  if (ui.composerFocused){
+    requestAnimationFrame(()=>{
+      const el = $('#textInput');
+      if (!el) return;
+      el.focus();
+      const start = Math.min(ui.composerSelectionStart, el.value.length);
+      const end = Math.min(ui.composerSelectionEnd, el.value.length);
+      el.setSelectionRange(start, end);
+    });
+  }
+}
+
+function scrollMessagesToBottom(){
+  const list = $('#msgList');
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+function syncPrivacyState(){
+  document.body.classList.toggle('privacy-active', ui.privacyMode);
+  document.body.classList.toggle('privacy-blur', ui.privacyMode && ui.privacyBlurred);
+  document.body.classList.toggle('no-select', ui.privacyMode);
+}
+
+function setPrivacyMode(enabled){
+  ui.privacyMode = !!enabled;
+  ui.privacyBlurred = false;
+  syncPrivacyState();
+}
+
+function handleWindowBlur(){
+  if (ui.privacyMode){ ui.privacyBlurred = true; syncPrivacyState(); }
+}
+
+function handleWindowFocus(){
+  ui.privacyBlurred = false;
+  syncPrivacyState();
+}
+
 function render(){
+  captureComposerState();
+  syncPrivacyState();
   if (!BACKEND_CONFIGURED){ renderBackendSetup(); return; }
   if (!session.username){ renderAuth(); return; }
   renderApp();
+  restoreComposerState();
 }
 
 function renderBackendSetup(){
@@ -384,7 +451,10 @@ function renderApp(){
           <button class="btn" id="btnNewChat">New private chat</button>
         </div>
         <div class="convo-list">
-          ${convos.length === 0 ? `<div class="empty-side">No conversations yet. Start one — every message is sealed with your contact's public key before it leaves your browser.</div>` : ''}
+          ${convos.length === 0 ? `<div class="empty-side">
+            <div style="font-size:13px; color:var(--text); margin-bottom:6px;">No conversations yet</div>
+            <div>Start one to begin a sealed exchange. Every message is encrypted before it leaves your browser.</div>
+          </div>` : ''}
           ${convos.map(c => `
             <div class="convo ${c.id===activeConvoId?'active':''}" data-id="${c.id}">
               <div class="avatar">${escapeHtml(initials(convoTitle(c)))}</div>
@@ -401,7 +471,8 @@ function renderApp(){
         ${activeConvo ? renderChat(activeConvo) : `
           <div class="no-chat">
             <div class="seal">${sealSvg()}</div>
-            <div>Pick a conversation, or start a new one.</div>
+            <div style="font-size:14px; color:var(--text);">Pick a conversation, or start a new one.</div>
+            <div style="font-size:11px; color:var(--muted); max-width:280px; text-align:center; line-height:1.6;">Your messages stay encrypted and only the intended recipient can unlock them.</div>
           </div>
         `}
       </div>
@@ -429,7 +500,10 @@ function renderChat(convo){
         <div class="chat-head-title">${escapeHtml(convoTitle(convo))}</div>
         <div class="chat-head-sub">${escapeHtml(headSub)}</div>
       </div>
-      <div class="seal" title="Encrypted with RSA-OAEP + AES-256-GCM">${sealSvg()}</div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <button class="icon-btn" id="btnPrivacy" title="${ui.privacyMode ? 'Disable privacy mode' : 'Enable privacy mode'}">${ui.privacyMode ? '🕶' : '👁'}</button>
+        <div class="seal" title="Encrypted with RSA-OAEP + AES-256-GCM">${sealSvg()}</div>
+      </div>
     </div>
     <div class="messages" id="msgList">
       ${msgs.map(m => renderMessage(m)).join('')}
@@ -493,7 +567,10 @@ function renderNewChatModal(){
         <h3>New private chat</h3>
         <div class="modal-sub">Pick one person for a 1:1 chat, or several to start a group. Every message is sealed individually to each person's key.</div>
         <div class="user-list">
-          ${others.length===0 ? `<div class="empty-side">Nobody else has joined yet — share this page with a friend so they can create an account.</div>` : ''}
+          ${others.length===0 ? `<div class="empty-side">
+            <div style="font-size:13px; color:var(--text); margin-bottom:6px;">No contacts yet</div>
+            <div>Share this page with a friend so they can create an account and start sealing messages.</div>
+          </div>` : ''}
           ${others.map(d => `
             <label class="user-pick">
               <input type="checkbox" value="${escapeHtml(d.username)}" ${ui.picked.includes(d.username)?'checked':''} />
@@ -525,6 +602,7 @@ function fileSvg(){ return `<svg width="14" height="14" viewBox="0 0 24 24" fill
 function attachAppListeners(){
   $('#btnLogout')?.addEventListener('click', logOut);
   $('#btnNewChat')?.addEventListener('click', ()=>{ ui.showNewChat = true; ui.picked=[]; render(); });
+  $('#btnPrivacy')?.addEventListener('click', ()=>{ setPrivacyMode(!ui.privacyMode); render(); });
 
   root.querySelectorAll('.convo').forEach(el=>{
     el.addEventListener('click', async ()=>{
@@ -532,7 +610,7 @@ function attachAppListeners(){
       await safely(async ()=>{
         await loadMessages(activeConvoId);
         render();
-        const list = $('#msgList'); if (list) list.scrollTop = list.scrollHeight;
+        requestAnimationFrame(scrollMessagesToBottom);
       }, 'Could not load that conversation — check your connection and try again.');
     });
   });
@@ -552,6 +630,41 @@ function attachAppListeners(){
   const fileInput = $('#fileInput');
 
   if (textInput){
+    const syncComposerHeight = ()=>{
+      textInput.style.height = 'auto';
+      textInput.style.height = Math.min(textInput.scrollHeight, 120) + 'px';
+    };
+
+    textInput.value = ui.composerText || '';
+    syncComposerHeight();
+    textInput.addEventListener('input', ()=>{
+      ui.composerText = textInput.value;
+      ui.composerSelectionStart = textInput.selectionStart ?? textInput.value.length;
+      ui.composerSelectionEnd = textInput.selectionEnd ?? textInput.value.length;
+      syncComposerHeight();
+    });
+    textInput.addEventListener('keyup', ()=>{
+      ui.composerText = textInput.value;
+      ui.composerSelectionStart = textInput.selectionStart ?? textInput.value.length;
+      ui.composerSelectionEnd = textInput.selectionEnd ?? textInput.value.length;
+      syncComposerHeight();
+    });
+    textInput.addEventListener('click', ()=>{
+      ui.composerSelectionStart = textInput.selectionStart ?? textInput.value.length;
+      ui.composerSelectionEnd = textInput.selectionEnd ?? textInput.value.length;
+      syncComposerHeight();
+    });
+    textInput.addEventListener('focus', ()=>{
+      ui.composerFocused = true;
+      ui.composerSelectionStart = textInput.selectionStart ?? textInput.value.length;
+      ui.composerSelectionEnd = textInput.selectionEnd ?? textInput.value.length;
+      syncComposerHeight();
+    });
+    textInput.addEventListener('blur', ()=>{
+      ui.composerFocused = false;
+      ui.composerSelectionStart = textInput.selectionStart ?? textInput.value.length;
+      ui.composerSelectionEnd = textInput.selectionEnd ?? textInput.value.length;
+    });
     textInput.addEventListener('keydown', (e)=>{
       if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); doSendText(); }
     });
@@ -569,7 +682,13 @@ function attachAppListeners(){
     const text = textInput.value;
     if (!text.trim()) return;
     textInput.value = '';
+    ui.composerText = '';
+    ui.composerSelectionStart = 0;
+    ui.composerSelectionEnd = 0;
+    ui.composerFocused = true;
+    syncComposerHeight();
     await safely(async ()=>{ await sendMessage({type:'text', text}); }, 'Message did not send — check your connection and try again.');
+    requestAnimationFrame(scrollMessagesToBottom);
   }
 
   // new-chat modal
