@@ -1,16 +1,14 @@
 /* ============================================================================
-   app.js — FINAL VERSION with ALL features working.
-   v2.0 – Includes: Replies, Reactions, Profile Pictures, Block, Privacy, Expiry, Search, Auto-Login.
+   app.js — WhatsApp-Style UI + Voice Messages
    ========================================================================= */
 
 const root = $('#root');
-console.log('🚀 Sealed v2.0 loading...');
+console.log('🚀 Sealed v2.2 loading...');
 
 // ---- VERSION CHECK ----
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.2';
 if (localStorage.getItem('sealed_version') !== APP_VERSION) {
   localStorage.setItem('sealed_version', APP_VERSION);
-  // Force rebuild of the shell on next render
   window._forceRebuild = true;
 }
 
@@ -20,9 +18,7 @@ if (localStorage.getItem('sealed_version') !== APP_VERSION) {
   if (saved) {
     try {
       const { username, password } = JSON.parse(atob(saved));
-      if (username && password) {
-        window._autoLoginData = { username, password };
-      }
+      if (username && password) window._autoLoginData = { username, password };
     } catch(e) { /* ignore */ }
   }
 })();
@@ -60,7 +56,18 @@ let ui = {
   privacyBlurred: false,
   messageExpiry: null,
   rememberMe: false,
-  replyingTo: null, // { id, sender, preview }
+  replyingTo: null,
+};
+
+// ---- VOICE RECORDER STATE ----
+let voiceRecorder = {
+  mediaRecorder: null,
+  audioChunks: [],
+  isRecording: false,
+  startTime: null,
+  timerInterval: null,
+  stream: null,
+  duration: 0,
 };
 
 // ---- 2. PERSISTENT DOM ----
@@ -84,17 +91,21 @@ const dom = {
   btnPrivacy: null,
   btnBlock: null,
   expiryPicker: null,
+  btnVoice: null,
+  voicePreview: null,
+  voiceTimer: null,
+  voiceCancelBtn: null,
+  voiceSendBtn: null,
 };
 
 // ---- 3. HELPERS ----
 function getOtherUsername(convo) {
-  if (convo.type === 'dm') {
-    return convo.members.find(m => m !== session.username);
-  }
+  if (convo.type === 'dm') return convo.members.find(m => m !== session.username);
   return null;
 }
 
 function getUserAvatar(username) {
+  if (username === session.username) return session.avatar;
   const entry = directory.find(d => d.username === username);
   return entry ? entry.avatar : null;
 }
@@ -130,6 +141,31 @@ function formatLastSeen(ts) {
   if (diff < 60000) return 'last seen ' + Math.floor(diff / 1000) + 's ago';
   if (diff < 3600000) return 'last seen ' + Math.floor(diff / 60000) + 'm ago';
   return 'last seen ' + new Date(ts).toLocaleString();
+}
+
+function getLastMessagePreview(convoId) {
+  const msgs = messagesCache[convoId] || [];
+  if (msgs.length === 0) return 'Tap to chat';
+  const last = msgs[msgs.length - 1];
+  if (last.type === 'text') return bufToStr(last._plainBuf);
+  if (last.type === 'image') return '📷 Photo';
+  if (last.type === 'audio') return '🎤 Voice message';
+  return '📎 File';
+}
+
+function formatTimeAgo(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 60000) return Math.floor(diff / 1000) + 's';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h';
+  if (diff < 604800000) return Math.floor(diff / 86400000) + 'd';
+  return new Date(ts).toLocaleDateString();
+}
+
+function formatDuration(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
 }
 
 // ---- 4. AUTH ----
@@ -236,7 +272,6 @@ function logOut() {
   convos = []; messagesCache = {}; activeConvoId = null;
   if (pollTimer) clearInterval(pollTimer);
   dom.shell = null;
-  // Force rebuild on next render
   window._forceRebuild = true;
   render();
 }
@@ -254,7 +289,6 @@ async function updateAvatar(base64Data) {
   renderApp();
 }
 
-// ---- 6. LAST SEEN ----
 async function updateLastSeen() {
   if (!session.username) return;
   const account = await getJSON('account:'+session.username, true);
@@ -265,7 +299,7 @@ async function updateLastSeen() {
   if (entry) entry.lastSeen = Date.now();
 }
 
-// ---- 7. BLOCK SYSTEM ----
+// ---- 6. BLOCK SYSTEM ----
 async function setBlock(targetUsername, type) {
   if (!session.username) return;
   const account = await getJSON('account:'+session.username, true);
@@ -294,7 +328,7 @@ async function checkBlockStatus(sender, recipient) {
   return result;
 }
 
-// ---- 8. CONVERSATIONS ----
+// ---- 7. CONVERSATIONS ----
 async function loadConvos() {
   const ids = (await getJSON('userConvos:'+session.username, true)) || [];
   const list = [];
@@ -358,7 +392,7 @@ async function createGroup(name, memberUsernames) {
   renderApp();
 }
 
-// ---- 9. MESSAGES ----
+// ---- 8. MESSAGES ----
 async function loadMessages(convoId) {
   let list = (await getJSON('messages:'+convoId, true)) || [];
   const now = Date.now();
@@ -380,6 +414,16 @@ async function loadMessages(convoId) {
     } catch(e) { /* skip */ }
   }
   messagesCache[convoId] = decrypted;
+  
+  const convo = convos.find(c => c.id === convoId);
+  if (convo && decrypted.length > 0) {
+    const last = decrypted[decrypted.length - 1];
+    if (last.type === 'text') convo.lastMessagePreview = bufToStr(last._plainBuf);
+    else if (last.type === 'image') convo.lastMessagePreview = '📷 Photo';
+    else if (last.type === 'audio') convo.lastMessagePreview = '🎤 Voice message';
+    else convo.lastMessagePreview = '📎 File';
+    convo.lastMessageTime = last.ts;
+  }
 }
 
 async function addReaction(msgId, emoji) {
@@ -398,7 +442,7 @@ async function addReaction(msgId, emoji) {
   renderApp();
 }
 
-async function sendMessage({type, text, file}) {
+async function sendMessage({type, text, file, audioBlob, duration}) {
   await loadConvos();
   let convo = convos.find(c => c.id === activeConvoId);
   if (!convo) {
@@ -432,10 +476,18 @@ async function sendMessage({type, text, file}) {
     }
   }
 
-  let bytes, filename=null, mime=null;
+  let bytes, filename=null, mime=null, audioDuration=null;
+
   if (type === 'text') {
     if (!text.trim()) return;
     bytes = strToBuf(text.trim());
+  } else if (type === 'audio') {
+    // Voice message: audioBlob is a Blob
+    if (!audioBlob) return;
+    bytes = await audioBlob.arrayBuffer();
+    mime = audioBlob.type || 'audio/webm';
+    filename = 'voice-message.webm';
+    audioDuration = duration || 0;
   } else {
     filename = file.name; mime = file.type;
     bytes = await file.arrayBuffer();
@@ -449,11 +501,7 @@ async function sendMessage({type, text, file}) {
   let replyToPreview = null;
   if (ui.replyingTo) {
     replyToId = ui.replyingTo.id;
-    if (ui.replyingTo.preview) {
-      replyToPreview = ui.replyingTo.preview;
-    } else {
-      replyToPreview = '[File/Image]';
-    }
+    replyToPreview = ui.replyingTo.preview || '[File/Image]';
     ui.replyingTo = null;
   }
 
@@ -474,6 +522,7 @@ async function sendMessage({type, text, file}) {
     reactions: {},
     replyToId: replyToId,
     replyToPreview: replyToPreview,
+    duration: audioDuration, // for voice messages
   };
 
   const list = (await getJSON('messages:'+convo.id, true)) || [];
@@ -481,6 +530,11 @@ async function sendMessage({type, text, file}) {
   await setJSON('messages:'+convo.id, list, true);
 
   convo.lastActivity = Date.now();
+  if (type === 'text') convo.lastMessagePreview = text.trim();
+  else if (type === 'image') convo.lastMessagePreview = '📷 Photo';
+  else if (type === 'audio') convo.lastMessagePreview = '🎤 Voice message';
+  else convo.lastMessagePreview = '📎 File';
+  convo.lastMessageTime = Date.now();
   await setJSON('convo:'+convo.id, convo, true);
 
   ui.messageExpiry = null;
@@ -528,6 +582,196 @@ async function markSaved(msgId) {
 function flashSeal() {
   const el = document.querySelector('.chat-head .seal');
   if (el){ el.classList.remove('stamp'); void el.offsetWidth; el.classList.add('stamp'); }
+}
+
+// ---- 9. VOICE RECORDING ----
+function formatVoiceDuration(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+}
+
+async function startVoiceRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mediaRecorder = new MediaRecorder(stream, {
+      mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+        ? 'audio/webm;codecs=opus' 
+        : 'audio/webm'
+    });
+    
+    voiceRecorder.stream = stream;
+    voiceRecorder.mediaRecorder = mediaRecorder;
+    voiceRecorder.audioChunks = [];
+    voiceRecorder.isRecording = true;
+    voiceRecorder.startTime = Date.now();
+    voiceRecorder.duration = 0;
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) voiceRecorder.audioChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+      voiceRecorder.isRecording = false;
+      if (voiceRecorder.timerInterval) {
+        clearInterval(voiceRecorder.timerInterval);
+        voiceRecorder.timerInterval = null;
+      }
+      // Show preview
+      showVoicePreview();
+    };
+
+    // Start timer
+    voiceRecorder.timerInterval = setInterval(() => {
+      voiceRecorder.duration = (Date.now() - voiceRecorder.startTime) / 1000;
+      if (dom.voiceTimer) {
+        dom.voiceTimer.textContent = formatVoiceDuration(voiceRecorder.duration);
+      }
+    }, 200);
+
+    mediaRecorder.start();
+    updateVoiceUI('recording');
+    toast('Recording...');
+  } catch (err) {
+    toast('Microphone access denied. Please allow microphone permissions.');
+    console.error('Voice recording error:', err);
+  }
+}
+
+function stopVoiceRecording() {
+  if (voiceRecorder.mediaRecorder && voiceRecorder.isRecording) {
+    voiceRecorder.mediaRecorder.stop();
+    // Stop all tracks
+    if (voiceRecorder.stream) {
+      voiceRecorder.stream.getTracks().forEach(track => track.stop());
+    }
+    if (voiceRecorder.timerInterval) {
+      clearInterval(voiceRecorder.timerInterval);
+      voiceRecorder.timerInterval = null;
+    }
+    toast('Recording finished');
+  }
+}
+
+function cancelVoiceRecording() {
+  if (voiceRecorder.mediaRecorder && voiceRecorder.isRecording) {
+    voiceRecorder.mediaRecorder.stop();
+    if (voiceRecorder.stream) {
+      voiceRecorder.stream.getTracks().forEach(track => track.stop());
+    }
+    if (voiceRecorder.timerInterval) {
+      clearInterval(voiceRecorder.timerInterval);
+      voiceRecorder.timerInterval = null;
+    }
+  }
+  voiceRecorder.audioChunks = [];
+  voiceRecorder.isRecording = false;
+  voiceRecorder.duration = 0;
+  updateVoiceUI('idle');
+  toast('Recording cancelled');
+}
+
+function showVoicePreview() {
+  if (voiceRecorder.audioChunks.length === 0) {
+    toast('No audio recorded.');
+    updateVoiceUI('idle');
+    return;
+  }
+  const blob = new Blob(voiceRecorder.audioChunks, { 
+    type: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+      ? 'audio/webm;codecs=opus' 
+      : 'audio/webm' 
+  });
+  const url = URL.createObjectURL(blob);
+  // Store for sending
+  voiceRecorder._previewBlob = blob;
+  voiceRecorder._previewUrl = url;
+  voiceRecorder._duration = voiceRecorder.duration;
+  
+  updateVoiceUI('preview');
+  // Set audio preview
+  const audioEl = document.getElementById('voicePreviewAudio');
+  if (audioEl) {
+    audioEl.src = url;
+    audioEl.load();
+  }
+  if (dom.voiceTimer) {
+    dom.voiceTimer.textContent = formatVoiceDuration(voiceRecorder.duration);
+  }
+}
+
+async function sendVoiceMessage() {
+  if (!voiceRecorder._previewBlob) return;
+  const blob = voiceRecorder._previewBlob;
+  const duration = voiceRecorder._duration || 0;
+  
+  // Send the voice message
+  await safely(async () => {
+    await sendMessage({
+      type: 'audio',
+      audioBlob: blob,
+      duration: duration
+    });
+  }, 'Could not send voice message.');
+  
+  // Clean up
+  if (voiceRecorder._previewUrl) {
+    URL.revokeObjectURL(voiceRecorder._previewUrl);
+  }
+  voiceRecorder._previewBlob = null;
+  voiceRecorder._previewUrl = null;
+  voiceRecorder.audioChunks = [];
+  voiceRecorder.duration = 0;
+  updateVoiceUI('idle');
+  dom.msgList.scrollTop = dom.msgList.scrollHeight;
+}
+
+function updateVoiceUI(state) {
+  const btnVoice = dom.btnVoice;
+  const voicePreview = dom.voicePreview;
+  const voiceTimer = dom.voiceTimer;
+  const textInput = dom.textInput;
+  const btnSend = dom.btnSend;
+
+  if (!btnVoice) return;
+
+  if (state === 'recording') {
+    btnVoice.textContent = '⏹';
+    btnVoice.style.color = 'var(--danger)';
+    btnVoice.title = 'Stop recording';
+    if (voicePreview) voicePreview.style.display = 'flex';
+    if (voiceTimer) voiceTimer.textContent = '00:00';
+    if (textInput) textInput.disabled = true;
+    if (btnSend) btnSend.style.display = 'none';
+    // Show cancel + send in preview
+    if (dom.voiceCancelBtn) dom.voiceCancelBtn.style.display = 'inline-block';
+    if (dom.voiceSendBtn) dom.voiceSendBtn.style.display = 'none';
+  } else if (state === 'preview') {
+    btnVoice.textContent = '🎤';
+    btnVoice.style.color = '';
+    btnVoice.title = 'Record voice message';
+    if (voicePreview) voicePreview.style.display = 'flex';
+    if (textInput) textInput.disabled = true;
+    if (btnSend) btnSend.style.display = 'none';
+    if (dom.voiceCancelBtn) dom.voiceCancelBtn.style.display = 'inline-block';
+    if (dom.voiceSendBtn) dom.voiceSendBtn.style.display = 'inline-block';
+  } else {
+    // idle
+    btnVoice.textContent = '🎤';
+    btnVoice.style.color = '';
+    btnVoice.title = 'Record voice message';
+    if (voicePreview) voicePreview.style.display = 'none';
+    if (textInput) textInput.disabled = false;
+    if (btnSend) btnSend.style.display = 'flex';
+    if (dom.voiceCancelBtn) dom.voiceCancelBtn.style.display = 'none';
+    if (dom.voiceSendBtn) dom.voiceSendBtn.style.display = 'none';
+    // Clean up preview audio
+    const audioEl = document.getElementById('voicePreviewAudio');
+    if (audioEl) {
+      audioEl.pause();
+      audioEl.src = '';
+    }
+  }
 }
 
 // ---- 10. TYPING INDICATOR ----
@@ -632,68 +876,79 @@ function scrollToMessage(msgId) {
   const el = dom.msgList.querySelector(`[data-msg-id="${msgId}"]`);
   if (el) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.style.background = 'rgba(0,255,156,0.1)';
+    el.style.background = 'rgba(0,229,160,0.15)';
     setTimeout(() => el.style.background = '', 2000);
   } else {
     toast('Original message not loaded.');
   }
 }
 
-// ----- BUILD SHELL (with ALL features) -----
+// ----- BUILD SHELL (WhatsApp Style + Voice) -----
 function buildShell() {
-  // If shell exists and we don't force rebuild, skip
   if (dom.shell && !window._forceRebuild) return;
+  console.log('🔄 Building WhatsApp-style shell with voice...');
 
-  console.log('🔄 Building fresh shell with all features...');
   dom.root.innerHTML = `
     <div class="shell" id="appShell">
+      <!-- SIDEBAR -->
       <div class="sidebar" id="sidebar">
         <div class="sb-head">
-          <div class="me" style="position:relative;">
+          <div class="me">
             <div class="avatar" id="myAvatar" style="position:relative; cursor:pointer;">
-              ${session.avatar ? `<img src="${session.avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />` : escapeHtml(initials(session.displayName))}
-              <span class="avatar-edit" id="avatarEditBtn" title="Change profile picture" style="position:absolute;bottom:-4px;right:-4px;background:var(--teal);color:#000;border-radius:50%;width:16px;height:16px;font-size:10px;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg);cursor:pointer;">✎</span>
+              ${session.avatar ? `<img src="${session.avatar}" />` : escapeHtml(initials(session.displayName))}
+              <span class="avatar-edit" id="avatarEditBtn" title="Change profile picture">✎</span>
             </div>
             <div class="me-name">${escapeHtml(session.displayName)}</div>
           </div>
-          <button class="icon-btn" id="btnLogout" title="Log out">${logoutSvg()}</button>
+          <div style="display:flex; gap:4px;">
+            <button class="icon-btn" id="btnNewChat" title="New chat">✏️</button>
+            <button class="icon-btn" id="btnLogout" title="Log out">⏻</button>
+          </div>
         </div>
-        <div class="sb-actions">
-          <button class="btn" id="btnNewChat">New private chat</button>
+        <div class="sb-search">
+          <input type="text" id="searchChats" placeholder="Search or start a new chat" />
         </div>
         <div class="convo-list" id="convoList"></div>
       </div>
+
+      <!-- MAIN -->
       <div class="main" id="mainArea">
         <div class="no-chat" id="noChat">
-          <div class="seal">${sealSvg()}</div>
-          <div style="font-size:14px; color:var(--text);">Pick a conversation, or start a new one.</div>
-          <div style="font-size:11px; color:var(--muted); max-width:280px; text-align:center; line-height:1.6;">Your messages stay encrypted.</div>
+          <div class="no-chat-icon">${sealSvg()}</div>
+          <div class="no-chat-title">Sealed</div>
+          <div class="no-chat-sub">Send and receive messages securely</div>
+          <div class="no-chat-hint">End-to-end encrypted</div>
         </div>
+
         <div class="chat-area" id="chatArea" style="display:none;">
           <div class="chat-head" id="chatHead">
-            <div>
-              <div class="chat-head-title" id="chatHeadTitle"></div>
-              <div class="chat-head-sub" id="chatHeadSub"></div>
+            <div class="chat-head-left">
+              <div class="chat-head-avatar" id="chatHeadAvatar"></div>
+              <div>
+                <div class="chat-head-title" id="chatHeadTitle"></div>
+                <div class="chat-head-sub" id="chatHeadSub"></div>
+              </div>
             </div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <button class="icon-btn" id="btnBlock" title="Block this user">⛔</button>
+            <div class="chat-head-right">
+              <button class="icon-btn" id="btnBlock" title="Block">⛔</button>
               <button class="icon-btn" id="btnPrivacy" title="Privacy mode">👁</button>
               <div class="seal" title="Encrypted">${sealSvg()}</div>
             </div>
           </div>
+
           <div class="messages" id="msgList"></div>
+
           <div class="composer" id="composerArea">
-            <!-- Reply Bar -->
-            <div id="replyBar" style="display:none; background:var(--surface-2); border-radius:6px; padding:6px 10px; margin-bottom:6px; border-left: 3px solid var(--teal); font-size:12px; color:var(--muted); justify-content:space-between; align-items:center; width:100%;">
+            <div id="replyBar" style="display:none;">
               <div>
-                <span style="color:var(--teal);">Replying to <span id="replySender"></span></span>
-                <div id="replyPreviewText" style="font-size:12px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px;"></div>
+                <span style="color:var(--accent);">Replying to <span id="replySender"></span></span>
+                <div id="replyPreviewText"></div>
               </div>
-              <button id="cancelReplyBtn" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;">✕</button>
+              <button id="cancelReplyBtn">✕</button>
             </div>
-            <!-- Composer row -->
-            <div style="display:flex; gap:6px; align-items:center; margin-right:6px; width:100%;">
-              <select id="expiryPicker" style="background:#000; border:1px solid var(--line); color:var(--text); border-radius:4px; padding:4px; font-size:11px; cursor:pointer;">
+            <div class="composer-row">
+              <button class="icon-btn" id="btnVoice" title="Voice message" style="font-size:22px;">🎤</button>
+              <select id="expiryPicker" style="background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px;cursor:pointer;">
                 <option value="">Off</option>
                 <option value="60000">1m</option>
                 <option value="300000">5m</option>
@@ -701,12 +956,19 @@ function buildShell() {
                 <option value="3600000">1h</option>
                 <option value="86400000">24h</option>
               </select>
-              <label class="icon-btn" style="cursor:pointer;">
-                ${clipSvg()}
+              <label class="icon-btn" style="cursor:pointer;font-size:20px;">
+                📎
                 <input type="file" id="fileInput" style="display:none" />
               </label>
-              <textarea id="textInput" rows="1" placeholder="Write a sealed message…"></textarea>
-              <button class="send-btn" id="btnSend">${sendSvg()}</button>
+              <textarea id="textInput" rows="1" placeholder="Type a message"></textarea>
+              <button class="send-btn" id="btnSend">➤</button>
+            </div>
+            <!-- Voice Preview (hidden by default) -->
+            <div id="voicePreview" style="display:none; background:var(--surface); border-radius:8px; padding:8px 12px; margin-top:6px; align-items:center; gap:12px; border:1px solid var(--line);">
+              <audio id="voicePreviewAudio" controls style="flex:1; max-width:200px; height:36px; background:var(--bg); border-radius:6px;"></audio>
+              <span id="voiceTimer" style="font-family:var(--mono); font-size:13px; color:var(--text); min-width:40px;">00:00</span>
+              <button id="voiceCancelBtn" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:18px;padding:0 6px;" title="Cancel">✕</button>
+              <button id="voiceSendBtn" style="background:var(--accent);border:none;border-radius:50%;width:36px;height:36px;cursor:pointer;font-size:16px;color:#000;display:none;" title="Send voice">➤</button>
             </div>
           </div>
         </div>
@@ -714,7 +976,7 @@ function buildShell() {
     </div>
   `;
 
-  // Hidden file input for avatar
+  // Hidden avatar input
   let avatarInput = document.getElementById('avatarFileInput');
   if (!avatarInput) {
     avatarInput = document.createElement('input');
@@ -725,7 +987,6 @@ function buildShell() {
     document.body.appendChild(avatarInput);
   }
 
-  // Store DOM refs
   dom.shell = $('#appShell');
   dom.sidebar = $('#sidebar');
   dom.convoList = $('#convoList');
@@ -735,6 +996,7 @@ function buildShell() {
   dom.chatHead = $('#chatHead');
   dom.chatHeadTitle = $('#chatHeadTitle');
   dom.chatHeadSub = $('#chatHeadSub');
+  dom.chatHeadAvatar = $('#chatHeadAvatar');
   dom.msgList = $('#msgList');
   dom.composerArea = $('#composerArea');
   dom.replyBar = $('#replyBar');
@@ -744,11 +1006,13 @@ function buildShell() {
   dom.btnPrivacy = $('#btnPrivacy');
   dom.btnBlock = $('#btnBlock');
   dom.expiryPicker = $('#expiryPicker');
+  dom.btnVoice = $('#btnVoice');
+  dom.voicePreview = $('#voicePreview');
+  dom.voiceTimer = $('#voiceTimer');
+  dom.voiceCancelBtn = $('#voiceCancelBtn');
+  dom.voiceSendBtn = $('#voiceSendBtn');
 
-  // Attach static listeners
   attachStaticListeners(avatarInput);
-
-  // Clear force rebuild flag
   window._forceRebuild = false;
 
   updateSidebar();
@@ -763,29 +1027,44 @@ function buildShell() {
   }
 }
 
-// ----- UPDATERS -----
+// ----- UPDATERS (WhatsApp Style) -----
 function updateSidebar() {
   const list = dom.convoList;
   if (!list) return;
   const scrollPos = list.scrollTop;
+
   list.innerHTML = convos.length === 0 ? `
     <div class="empty-side">
-      <div style="font-size:13px; color:var(--text); margin-bottom:6px;">No conversations yet</div>
-      <div>Start one to begin a sealed exchange.</div>
+      <div style="font-size:14px; font-weight:600; margin-bottom:4px;">No chats</div>
+      <div style="font-size:13px;">Start a new conversation</div>
     </div>
   ` : convos.map(c => {
     const title = convoTitle(c);
     const other = c.type === 'dm' ? getOtherUsername(c) : null;
     const avatar = other ? getUserAvatar(other) : null;
+    const online = other ? isUserOnline(other) : false;
+    const preview = c.lastMessagePreview || 'Tap to chat';
+    const time = c.lastMessageTime ? formatTimeAgo(c.lastMessageTime) : '';
+    const isActive = c.id === activeConvoId;
+
     return `
-    <div class="convo ${c.id===activeConvoId?'active':''}" data-id="${c.id}">
-      <div class="avatar">${avatar ? `<img src="${avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />` : escapeHtml(initials(title))}</div>
-      <div class="convo-meta">
-        <div class="convo-name">${escapeHtml(title)}${c.type==='group'?'<span class="badge">GROUP</span>':''}</div>
-        <div class="convo-sub">${escapeHtml(convoSubtitle(c))}</div>
+    <div class="convo ${isActive ? 'active' : ''}" data-id="${c.id}">
+      <div class="convo-avatar">
+        ${avatar ? `<img src="${avatar}" />` : `<span>${initials(title)}</span>`}
+        ${online ? '<span class="online-dot"></span>' : ''}
+      </div>
+      <div class="convo-info">
+        <div class="convo-row">
+          <span class="convo-name">${escapeHtml(title)}</span>
+          <span class="convo-time">${time}</span>
+        </div>
+        <div class="convo-row">
+          <span class="convo-preview">${escapeHtml(preview)}</span>
+        </div>
       </div>
     </div>
   `}).join('');
+
   list.scrollTop = scrollPos;
   list.querySelectorAll('.convo').forEach(el => {
     el.addEventListener('click', async () => {
@@ -800,18 +1079,42 @@ function updateSidebar() {
       dom.msgList.scrollTop = dom.msgList.scrollHeight;
     });
   });
+
+  const searchInput = $('#searchChats');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      const q = searchInput.value.toLowerCase().trim();
+      list.querySelectorAll('.convo').forEach(el => {
+        const name = el.querySelector('.convo-name')?.textContent?.toLowerCase() || '';
+        el.style.display = name.includes(q) ? 'flex' : 'none';
+      });
+    });
+  }
 }
 
 function updateChatHead() {
   if (!activeConvoId) return;
   const convo = convos.find(c => c.id === activeConvoId);
   if (!convo) return;
-  dom.chatHeadTitle.textContent = convoTitle(convo);
-  if (convo.type === 'dm') {
-    const other = getOtherUsername(convo);
-    const entry = directory.find(d => d.username === other);
-    const online = entry && isUserOnline(other);
-    dom.chatHeadSub.textContent = online ? '🟢 Online' : (entry ? formatLastSeen(entry.lastSeen) : '@' + other);
+  
+  const title = convoTitle(convo);
+  dom.chatHeadTitle.textContent = title;
+  
+  const other = convo.type === 'dm' ? getOtherUsername(convo) : null;
+  const avatar = other ? getUserAvatar(other) : null;
+  dom.chatHeadAvatar.innerHTML = avatar ? `<img src="${avatar}" />` : initials(title);
+  
+  if (convo.type === 'dm' && other) {
+    const online = isUserOnline(other);
+    getTypingUsers(activeConvoId).then(users => {
+      if (users.includes(other)) {
+        dom.chatHeadSub.textContent = 'typing...';
+        dom.chatHeadSub.style.color = 'var(--accent)';
+      } else {
+        dom.chatHeadSub.textContent = online ? 'Online' : formatLastSeen(directory.find(d => d.username === other)?.lastSeen);
+        dom.chatHeadSub.style.color = 'var(--text-muted)';
+      }
+    });
   } else {
     dom.chatHeadSub.textContent = convo.members.length + ' members';
   }
@@ -825,28 +1128,64 @@ function updateMessages() {
 
   dom.msgList.innerHTML = msgs.map(m => renderMessage(m)).join('');
 
-  // Attach listeners
+  // Attach listeners for voice players
+  dom.msgList.querySelectorAll('.voice-player').forEach(el => {
+    const audio = el.querySelector('audio');
+    const playBtn = el.querySelector('.voice-play-btn');
+    const progress = el.querySelector('.voice-progress');
+    const durationEl = el.querySelector('.voice-duration');
+    
+    if (audio && playBtn) {
+      playBtn.addEventListener('click', () => {
+        if (audio.paused) {
+          // Pause other players
+          document.querySelectorAll('.voice-player audio').forEach(a => {
+            if (a !== audio) a.pause();
+          });
+          audio.play();
+          playBtn.textContent = '⏸';
+        } else {
+          audio.pause();
+          playBtn.textContent = '▶';
+        }
+      });
+      audio.addEventListener('timeupdate', () => {
+        if (progress) {
+          const pct = (audio.currentTime / audio.duration) * 100;
+          progress.style.width = pct + '%';
+        }
+      });
+      audio.addEventListener('ended', () => {
+        playBtn.textContent = '▶';
+        if (progress) progress.style.width = '0%';
+      });
+      audio.addEventListener('loadedmetadata', () => {
+        if (durationEl) {
+          durationEl.textContent = formatDuration(audio.duration);
+        }
+      });
+    }
+  });
+
   dom.msgList.querySelectorAll('.msg-row').forEach(row => {
     const mid = row.dataset.msgId;
     if (!mid) return;
-    // Reaction picker
-    const reactionPicker = row.querySelector('.reaction-picker');
-    if (reactionPicker) {
-      reactionPicker.querySelectorAll('.reaction-emoji').forEach(el => {
+    const picker = row.querySelector('.reaction-picker');
+    if (picker) {
+      picker.querySelectorAll('.reaction-emoji').forEach(el => {
         el.addEventListener('click', (e) => {
           e.stopPropagation();
           safely(() => addReaction(mid, el.dataset.emoji), 'Could not add reaction.');
         });
       });
     }
-    // Reply button
     const replyBtn = row.querySelector('.reply-btn');
     if (replyBtn) {
       replyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const msg = messagesCache[activeConvoId].find(m => m.id === mid);
         if (!msg) return;
-        const preview = msg.type === 'text' ? bufToStr(msg._plainBuf) : '[File/Image]';
+        const preview = msg.type === 'text' ? bufToStr(msg._plainBuf) : (msg.type === 'audio' ? '🎤 Voice message' : '[File/Image]');
         ui.replyingTo = { id: mid, sender: msg.sender, preview };
         renderApp();
         dom.textInput?.focus();
@@ -854,19 +1193,14 @@ function updateMessages() {
     }
   });
 
-  // Reply preview click to scroll
   dom.msgList.querySelectorAll('.reply-preview').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
       const targetId = el.dataset.replyId;
-      if (targetId) {
-        window.location.hash = 'msg-' + targetId;
-        scrollToMessage(targetId);
-      }
+      if (targetId) scrollToMessage(targetId);
     });
   });
 
-  // Save & download listeners
   dom.msgList.querySelectorAll('[data-save-id]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -892,22 +1226,37 @@ function renderMessage(m) {
   let replyHtml = '';
   if (m.replyToId && m.replyToPreview) {
     replyHtml = `
-      <div class="reply-preview" data-reply-id="${m.replyToId}" style="cursor:pointer; background:var(--surface-2); border-left: 2px solid var(--teal); padding:4px 8px; border-radius:4px; margin-bottom:6px; font-size:12px; color:var(--muted);">
-        <span style="color:var(--teal);">↩️ ${getUserDisplayName(m.replyToPreview.sender || '')}</span>
-        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(m.replyToPreview)}</div>
+      <div class="reply-preview" data-reply-id="${m.replyToId}">
+        <span>↩️ ${getUserDisplayName(m.replyToPreview.sender || '')}</span>
+        <div>${escapeHtml(m.replyToPreview)}</div>
       </div>
     `;
   }
 
   if (m.type === 'text') {
     body = `<div>${escapeHtml(bufToStr(m._plainBuf))}</div>`;
+  } else if (m.type === 'audio') {
+    // Voice message player
+    const blob = new Blob([m._plainBuf], { type: m.mime || 'audio/webm' });
+    const url = URL.createObjectURL(blob);
+    const duration = m.duration || 0;
+    body = `
+      <div class="voice-player">
+        <audio src="${url}" preload="metadata"></audio>
+        <button class="voice-play-btn">▶</button>
+        <div class="voice-progress-bar">
+          <div class="voice-progress" style="width:0%;"></div>
+        </div>
+        <span class="voice-duration">${formatDuration(duration)}</span>
+      </div>
+    `;
   } else {
     const blob = new Blob([m._plainBuf], { type: m.mime || 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     if (m.type === 'image') {
       body = `<div><img src="${url}" /></div>`;
     } else {
-      body = `<a class="file-chip" href="${url}" download="${escapeHtml(m.filename||'file')}" data-download-id="${m.id}">${fileSvg()} ${escapeHtml(m.filename||'file')}</a>`;
+      body = `<a class="file-chip" href="${url}" download="${escapeHtml(m.filename||'file')}" data-download-id="${m.id}">📎 ${escapeHtml(m.filename||'file')}</a>`;
     }
   }
 
@@ -915,22 +1264,19 @@ function renderMessage(m) {
   if (m.reactions) {
     const emojis = Object.values(m.reactions);
     if (emojis.length > 0) {
-      const grouped = emojis.reduce((acc, em) => {
-        acc[em] = (acc[em] || 0) + 1;
-        return acc;
-      }, {});
+      const grouped = emojis.reduce((acc, em) => { acc[em] = (acc[em] || 0) + 1; return acc; }, {});
       reactionsHtml = `<div class="reactions">${Object.entries(grouped).map(([em, count]) => `<span class="reaction-badge">${em} ${count}</span>`).join('')}</div>`;
     }
   }
 
   const pickerHtml = `<div class="reaction-picker">${['👍','❤️','😂','😮','😢','🙏'].map(e => `<span class="reaction-emoji" data-emoji="${e}">${e}</span>`).join('')}</div>`;
-  const replyBtnHtml = `<span class="reply-btn" style="cursor:pointer; font-size:12px; margin-right:8px; opacity:0.6;">↩️</span>`;
+  const replyBtnHtml = `<span class="reply-btn">↩️</span>`;
 
   let readStatus = '';
   if (!mine && m.readBy && m.readBy[session.username]) {
-    readStatus = '<span style="font-size:10px; color:var(--teal); margin-left:8px;">✓ Seen</span>';
+    readStatus = '<span class="read-status seen">✓✓</span>';
   } else if (!mine) {
-    readStatus = '<span style="font-size:10px; color:var(--muted); margin-left:8px;">✓ Delivered</span>';
+    readStatus = '<span class="read-status">✓</span>';
   }
 
   let expiryInfo = '';
@@ -939,24 +1285,24 @@ function renderMessage(m) {
     if (remaining > 0) {
       const mins = Math.floor(remaining / 60000);
       const secs = Math.floor((remaining % 60000) / 1000);
-      expiryInfo = `<span style="font-size:9px; color:var(--muted); margin-left:6px;">⌛ ${mins}m ${secs}s</span>`;
+      expiryInfo = `<span class="expiry-timer">⌛ ${mins}m ${secs}s</span>`;
     }
   }
 
   const savedMarkup = m.savedAt
-    ? `<span class="save-btn saved"><span class="ring"></span> deletes ${timeLeft(m.savedAt)}</span>`
-    : `<button class="save-btn" data-save-id="${m.id}">Save</button>`;
+    ? `<span class="save-btn saved">💾 ${timeLeft(m.savedAt)}</span>`
+    : `<button class="save-btn" data-save-id="${m.id}">💾 Save</button>`;
 
-  const avatarHtml = avatar ? `<img src="${avatar}" style="width:16px;height:16px;border-radius:50%;object-fit:cover;margin-right:4px;" />` : '';
+  const avatarHtml = avatar ? `<img src="${avatar}" />` : '';
 
   return `
-    <div class="msg-row ${mine?'mine':'theirs'}" data-msg-id="${m.id}">
+    <div class="msg-row ${mine ? 'mine' : 'theirs'}" data-msg-id="${m.id}">
       <div class="msg-sender">${avatarHtml} ${escapeHtml(senderName)}</div>
       <div class="bubble">
         ${replyHtml}
         ${body}
         ${pickerHtml}
-        <div style="display:flex; align-items:center; margin-top:4px; gap:4px;">
+        <div class="bubble-actions">
           ${replyBtnHtml}
         </div>
       </div>
@@ -988,7 +1334,6 @@ function render() {
 }
 
 function renderApp() {
-  // Build shell if needed (or if force rebuild)
   if (!dom.shell || window._forceRebuild) {
     buildShell();
   } else {
@@ -998,28 +1343,14 @@ function renderApp() {
       dom.noChat.style.display = 'none';
       updateChatHead();
       updateMessages();
-      getTypingUsers(activeConvoId).then(users => {
-        if (users.length > 0) {
-          const names = users.map(u => getUserDisplayName(u)).join(', ');
-          dom.chatHeadSub.textContent = names + ' typing...';
-        } else {
-          updateChatHead();
-        }
-      });
     } else {
       dom.chatArea.style.display = 'none';
       dom.noChat.style.display = 'flex';
     }
   }
-
   updateReplyBar();
-
-  if (ui.showNewChat) {
-    renderNewChatModal();
-  } else {
-    const modal = $('#modalBg');
-    if (modal) modal.remove();
-  }
+  if (ui.showNewChat) renderNewChatModal();
+  else { const modal = $('#modalBg'); if (modal) modal.remove(); }
 }
 
 function updateReplyBar() {
@@ -1069,9 +1400,9 @@ function renderAuth() {
           <label>passphrase</label>
           <input type="password" id="f-password" autocomplete="${ui.authTab==='signup'?'new-password':'current-password'}" placeholder="••••••••" />
           ${ui.authTab==='signup' ? `<div class="hint">min. 8 characters recommended.</div>` : ''}
-          <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px;">
-            <input type="checkbox" id="f-remember" style="accent-color: var(--teal); width: 16px; height: 16px;" ${ui.rememberMe ? 'checked' : ''} />
-            <label for="f-remember" style="margin:0; font-size:12px; color:var(--muted); cursor:pointer;">Remember me</label>
+          <div class="checkbox-row">
+            <input type="checkbox" id="f-remember" ${ui.rememberMe ? 'checked' : ''} />
+            <label for="f-remember">Remember me</label>
           </div>
           <button class="btn" type="submit" ${ui.busy?'disabled':''}>${ui.busy ? 'working...' : (ui.authTab==='login' ? '[ log in ]' : '[ create sealed account ]')}</button>
           <div class="err">${ui.authErr ? escapeHtml(ui.authErr) : ''}</div>
@@ -1118,26 +1449,26 @@ function renderNewChatModal() {
     <div class="modal-bg" id="modalBg">
       <div class="modal">
         <div class="modal-body">
-          <h3>New private chat</h3>
-          <div class="modal-sub">Pick one person for 1:1, or several for a group.</div>
-          <input type="text" id="contactSearch" placeholder="Search contacts..." style="width:100%; background:#000; border:1px solid var(--line); color:var(--text); padding:8px 10px; border-radius:4px; margin-bottom:12px;" />
+          <h3>New chat</h3>
+          <div class="modal-sub">Select a contact to start a private chat, or pick multiple to create a group.</div>
+          <input type="text" id="contactSearch" placeholder="Search contacts..." />
           <div class="user-list" id="userList">
             ${others.length===0 ? `<div class="empty-side">No contacts yet</div>` : ''}
             ${others.map(d => `
               <label class="user-pick" data-username="${escapeHtml(d.username)}">
                 <input type="checkbox" value="${escapeHtml(d.username)}" ${ui.picked.includes(d.username)?'checked':''} />
-                <div class="avatar">${d.avatar ? `<img src="${d.avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />` : escapeHtml(initials(d.displayName))}</div>
+                <div class="avatar">${d.avatar ? `<img src="${d.avatar}" />` : escapeHtml(initials(d.displayName))}</div>
                 <div>
-                  <div style="font-size:13.5px;font-weight:600;">${escapeHtml(d.displayName)}</div>
-                  <div style="font-size:11px;color:var(--muted);font-family:var(--mono);">@${escapeHtml(d.username)}</div>
+                  <div style="font-weight:600;">${escapeHtml(d.displayName)}</div>
+                  <div style="font-size:12px;color:var(--text-muted);">@${escapeHtml(d.username)}</div>
                 </div>
               </label>
             `).join('')}
           </div>
-          ${ui.picked.length > 1 ? `<input type="text" id="groupName" placeholder="Group name" style="width:100%; background:#000; border:1px solid var(--line); color:var(--text); padding:8px 10px; border-radius:4px; margin-bottom:14px;" />` : ''}
+          ${ui.picked.length > 1 ? `<input type="text" id="groupName" placeholder="Group name" />` : ''}
           <div class="modal-footer">
-            <button class="btn ghost" id="modalCancel" style="flex:1;">Cancel</button>
-            <button class="btn" id="modalGo" style="flex:1;" ${ui.picked.length===0?'disabled':''}>${ui.picked.length>1?'Create group':'Start chat'}</button>
+            <button class="btn ghost" id="modalCancel">Cancel</button>
+            <button class="btn" id="modalGo" ${ui.picked.length===0?'disabled':''}>${ui.picked.length>1?'Create group':'Start chat'}</button>
           </div>
         </div>
       </div>
@@ -1161,15 +1492,9 @@ function renderNewChatModal() {
   }
 
   $('#modalBg')?.addEventListener('click', (e) => {
-    if (e.target.id === 'modalBg') {
-      ui.showNewChat = false;
-      render();
-    }
+    if (e.target.id === 'modalBg') { ui.showNewChat = false; render(); }
   });
-  $('#modalCancel')?.addEventListener('click', () => {
-    ui.showNewChat = false;
-    render();
-  });
+  $('#modalCancel')?.addEventListener('click', () => { ui.showNewChat = false; render(); });
   document.querySelectorAll('.user-pick input').forEach(cb => {
     cb.addEventListener('change', () => {
       if (cb.checked) ui.picked.push(cb.value);
@@ -1194,23 +1519,16 @@ function renderNewChatModal() {
 
 // ---- 16. STATIC LISTENERS ----
 function attachStaticListeners(avatarInput) {
-  // Logout
   $('#btnLogout')?.addEventListener('click', logOut);
-  
-  // New Chat
   $('#btnNewChat')?.addEventListener('click', () => {
     ui.showNewChat = true;
     ui.picked = [];
     render();
   });
-  
-  // Privacy
   $('#btnPrivacy')?.addEventListener('click', () => {
     setPrivacyMode(!ui.privacyMode);
     render();
   });
-  
-  // Block
   dom.btnBlock?.addEventListener('click', async () => {
     if (!activeConvoId) return toast('No chat selected.');
     const convo = convos.find(c => c.id === activeConvoId);
@@ -1223,7 +1541,7 @@ function attachStaticListeners(avatarInput) {
     else await setBlock(other, 'soft');
   });
 
-  // Avatar upload
+  // Avatar
   const avatarEditBtn = $('#avatarEditBtn');
   if (avatarEditBtn) {
     avatarEditBtn.addEventListener('click', (e) => {
@@ -1255,10 +1573,7 @@ function attachStaticListeners(avatarInput) {
     });
   }
 
-  // Send button
   dom.btnSend?.addEventListener('click', doSendText);
-  
-  // File input
   dom.fileInput?.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1269,7 +1584,40 @@ function attachStaticListeners(avatarInput) {
     dom.fileInput.value = '';
   });
 
-  // Text input
+  // ---- VOICE BUTTON ----
+  dom.btnVoice?.addEventListener('click', () => {
+    if (voiceRecorder.isRecording) {
+      // Stop recording
+      stopVoiceRecording();
+    } else if (voiceRecorder._previewBlob) {
+      // If preview is showing, do nothing (user should use send/cancel)
+      return;
+    } else {
+      // Start recording
+      startVoiceRecording();
+    }
+  });
+
+  // Voice cancel
+  dom.voiceCancelBtn?.addEventListener('click', () => {
+    if (voiceRecorder.isRecording) {
+      cancelVoiceRecording();
+    } else {
+      // Cancel preview
+      if (voiceRecorder._previewUrl) {
+        URL.revokeObjectURL(voiceRecorder._previewUrl);
+      }
+      voiceRecorder._previewBlob = null;
+      voiceRecorder._previewUrl = null;
+      voiceRecorder.audioChunks = [];
+      voiceRecorder.duration = 0;
+      updateVoiceUI('idle');
+    }
+  });
+
+  // Voice send
+  dom.voiceSendBtn?.addEventListener('click', sendVoiceMessage);
+
   if (dom.textInput) {
     dom.textInput.addEventListener('input', () => {
       ui.composerText = dom.textInput.value;
@@ -1293,7 +1641,6 @@ function attachStaticListeners(avatarInput) {
     dom.textInput.addEventListener('blur', () => { ui.composerFocused = false; });
   }
 
-  // Cancel Reply
   const cancelReply = $('#cancelReplyBtn');
   if (cancelReply) {
     cancelReply.addEventListener('click', () => {
@@ -1303,7 +1650,6 @@ function attachStaticListeners(avatarInput) {
     });
   }
 
-  // Expiry picker
   if (dom.expiryPicker) {
     dom.expiryPicker.addEventListener('change', () => {
       const val = dom.expiryPicker.value;
@@ -1311,7 +1657,6 @@ function attachStaticListeners(avatarInput) {
     });
   }
 
-  // Window events
   window.addEventListener('blur', handleWindowBlur);
   window.addEventListener('focus', handleWindowFocus);
   window.addEventListener('beforeunload', () => {
@@ -1319,7 +1664,6 @@ function attachStaticListeners(avatarInput) {
   });
 }
 
-// ---- 17. SEND HELPER ----
 async function doSendText() {
   const text = dom.textInput?.value;
   if (!text || !text.trim()) return;
@@ -1332,16 +1676,12 @@ async function doSendText() {
   dom.msgList.scrollTop = dom.msgList.scrollHeight;
 }
 
-// ---- 18. SVG HELPERS (Fixed) ----
+// ---- 17. SVG HELPERS ----
 function sealSvg() {
   return '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-8-4z" fill="#0B0D12" opacity="0.85"/><path d="M8.5 12.2l2.4 2.4 4.6-4.9" stroke="#E8A33D" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
-function logoutSvg(){ return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>`; }
-function clipSvg(){ return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a5 5 0 01-7.07-7.07l9.19-9.19a3.5 3.5 0 014.95 4.95L9.41 17.86a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>`; }
-function sendSvg(){ return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0B0D12" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>`; }
-function fileSvg(){ return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>`; }
 
-// ---- 19. AUTO-LOGIN EXECUTION ----
+// ---- 18. AUTO-LOGIN ----
 (async function runAutoLogin() {
   if (window._autoLoginData) {
     const { username, password } = window._autoLoginData;
@@ -1364,6 +1704,6 @@ function fileSvg(){ return `<svg width="14" height="14" viewBox="0 0 24 24" fill
   }
 })();
 
-// ---- 20. START ----
+// ---- 19. START ----
 render();
-console.log('✅ Sealed v2.0 ready');
+console.log('✅ Sealed v2.2 ready (voice messages)');
