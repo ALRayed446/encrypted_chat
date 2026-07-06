@@ -329,6 +329,10 @@ async function sendMessage({type, text, file}){
   await loadConvos();
   render();
   flashSeal();
+  // render() just tore down and rebuilt the whole chat view, including the
+  // textarea itself — a fresh DOM node never has focus even if the old one
+  // did, which is exactly why the cursor was dropping out after every send.
+  const ti = $('#textInput'); if (ti) ti.focus();
 }
 
 // Schedules a text message to be sent later. The message is encrypted RIGHT
@@ -354,6 +358,7 @@ async function scheduleMessage(text, scheduledFor){
   await loadMessages(convo.id);
   render();
   toast('Message scheduled for ' + fmtTime(scheduledFor));
+  const ti = $('#textInput'); if (ti) ti.focus();
 }
 
 async function cancelScheduledMessage(msgId){
