@@ -51,15 +51,6 @@ function toast(msg){
   document.body.appendChild(t);
   setTimeout(()=>t.remove(), 2400);
 }
-// Formats a Date for use as the value of an <input type="datetime-local">,
-// in the browser's LOCAL time (not UTC) since that's what the picker shows.
-function toDatetimeLocalValue(date){
-  const pad = n => String(n).padStart(2,'0');
-  return date.getFullYear()+'-'+pad(date.getMonth()+1)+'-'+pad(date.getDate())+'T'+pad(date.getHours())+':'+pad(date.getMinutes());
-}
-// new Date("YYYY-MM-DDTHH:MM") already parses that string as local time,
-// so this just hands the datetime-local input's value to Date and reads the timestamp back out.
-function fromDatetimeLocalValue(str){ return new Date(str).getTime(); }
 // Runs an async UI action and turns any failure into a toast instead of a
 // silent no-op, so network hiccups during normal use are never invisible.
 async function safely(fn, failMsg){

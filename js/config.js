@@ -45,22 +45,3 @@ const STORAGE_TIMEOUT_MS = 8000;
 // A message is deleted for everyone this long after the first person saves
 // or downloads it (see markSaved() in app.js).
 const AUTO_DELETE_MS = 30 * 60 * 1000; // 30 minutes
-
-// ── Retention & account lifecycle ──────────────────────────────────────
-// User-selectable options for "how long should conversation history stick
-// around" (Settings -> Retention). Applied per-conversation as the SHORTEST
-// setting among everyone in that conversation — nobody's stricter privacy
-// preference gets overridden by someone else's looser one.
-const RETENTION_OPTIONS_DAYS = [3, 7, 15, 30];
-const DEFAULT_RETENTION_DAYS = 30;
-
-// If a conversation's soonest-to-expire message is within this window,
-// show a "these will be deleted soon" banner (see getRetentionWarning() in app.js).
-const RETENTION_WARNING_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-// Account expiry: if nobody logs in for this long, the account is swept up
-// the next time ANY logged-in user's browser happens to run the check
-// (see runAccountExpirySweep() in app.js). There's no real server here, so
-// this is best-effort, not a guaranteed-timing background job.
-const ACCOUNT_EXPIRY_DAYS = 3;
-const ACCOUNT_EXPIRY_MS = ACCOUNT_EXPIRY_DAYS * 24 * 60 * 60 * 1000;

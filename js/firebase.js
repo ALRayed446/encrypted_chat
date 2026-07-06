@@ -33,9 +33,3 @@ async function setJSON(key, value, shared){
   }
   return await res.json();
 }
-
-// Firebase represents "delete this path" as writing JSON null to it — this
-// just makes that intent readable at the call site (used by account expiry).
-async function deleteJSON(key){
-  return setJSON(key, null, true);
-}
