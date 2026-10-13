@@ -29,7 +29,16 @@ async function setJSON(key, value, shared){
     throw new Error(e.message && e.message.includes('timed out') ? e.message : 'Network error while saving — ' + (e.message || 'request failed') + '. Check your connection and try again.');
   }
   if (!res.ok){
-    throw new Error('The database rejected that save (HTTP ' + res.status + '). If you just set this up, double-check the Realtime Database rules allow writes.');
+    // Firebase explains itself in the response body, e.g. {"error":"Permission denied"}.
+    // Read it so the message tells the truth instead of guessing.
+    let detail = '';
+    try{ detail = (await res.text()).slice(0, 160); }catch(e){}
+    if (res.status === 401 || res.status === 403){
+      // 401/403 = "you are not allowed". On a new Firebase project that is almost always
+      // the test-mode rules, which EXPIRE about 30 days after you create them.
+      throw new Error('The database refused permission (HTTP ' + res.status + '). Open Firebase console → Realtime Database → Rules and make sure writes are allowed — test-mode rules expire after about 30 days. ' + detail);
+    }
+    throw new Error('The database rejected that save (HTTP ' + res.status + '). ' + (detail ? 'Firebase says: ' + detail : 'No further detail was given.'));
   }
   return await res.json();
 }
